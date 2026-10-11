@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "branch": "main_1",
+  "upstream_base": "f1ccf436a27522c1bb5d36383a6f13b950676338",
+  "upstream_base_date": "2026-09-04",
+  "archived_official_main": "97a9ae8ee55d31bebce49f1fb6b5ef775323976a",
+  "archive_branch": "legacy/main_20261011",
+  "source": "Read-only export of the active Shanghai core release; not its user home or newer inactive checkout",
+  "instance_data_allowed": false,
+  "private_configuration_allowed": false,
+  "public_upstream_templates": ["SOUL.md", "AGENTS.md"],
+  "publication_redactions": {
+    "reason": "Private confirmation phrase and instance-specific display labels replaced only in the public source copy; no running files changed",
+    "files": ["tools/approval.py", "gateway/run_turn_runner.py", "plugins/owner-action-approval/__init__.py", "plugins/owner-action-approval/test_policy.py", "tests/tools/test_owner_high_impact_approval.py"],
+    "public_confirmation_phrase": "CONFIRM_DELETE",
+    "security_contract": "Owner/principal, session, request, expiry and replay protections are retained. The confirmation phrase is not authentication."
+  },
+  "extra_metadata_paths": [".gitignore", "LD_SOURCE_POLICY.json", "LD_VERSION.txt"],
+  "python_roots": ["agent", "gateway", "hermes_cli", "tools", "plugins", "providers", "cron", "tests", "scripts"],
+  "yaml_roots": ["locales", "plugins"],
+  "admission_command": "python3 scripts/ci/check_ld_public_source.py --ref HEAD",
+  "deployment_policy": "No automatic pull, checkout, package install or service restart against a live release. Build and validate a separate candidate before an explicitly approved deployment."
+}

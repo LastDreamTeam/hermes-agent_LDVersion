@@ -196,6 +196,17 @@ class PluginDispatchMixin:
             except Exception as exc:
                 logger.warning(
                     "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc)
+                if (
+                    hook_name == "pre_tool_call"
+                    and getattr(cb, "_hermes_fail_closed_on_exception", False)
+                ):
+                    results.append({
+                        "action": "block",
+                        "message": (
+                            "pre_tool_call owner high-impact policy raised an exception; "
+                            "the tool was blocked fail-closed"
+                        ),
+                    })
         return results
 
     def _run_hook_callback_bounded(

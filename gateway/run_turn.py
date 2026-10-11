@@ -15,7 +15,7 @@ import os
 import queue
 import threading
 import time
-from agent.i18n import t
+from agent.i18n import get_language, t
 from contextlib import nullcontext, suppress
 from contextvars import copy_context
 from gateway.config import Platform
@@ -533,6 +533,18 @@ class GatewayTurnMixin:
             return parsed if (parsed >= 0 if allow_zero else parsed > 0) else current
 
         hs.hard_msg_limit = _knob("hygiene_hard_message_limit", hs.hard_msg_limit, int)
+        _raw_hygiene_threshold = _comp_cfg.get("hygiene_threshold")
+        if _raw_hygiene_threshold is not None:
+            try:
+                _parsed_hygiene_threshold = float(_raw_hygiene_threshold)
+            except (TypeError, ValueError):
+                pass
+            else:
+                if 0 < _parsed_hygiene_threshold < 1:
+                    hs.threshold_pct = _parsed_hygiene_threshold
+        hs.threshold_tokens_cap = _knob(
+            "hygiene_threshold_tokens", hs.threshold_tokens_cap, int
+        )
         hs.timeout_seconds = _knob("hygiene_timeout_seconds", hs.timeout_seconds, float)
         hs.total_ceiling_seconds = _knob("hygiene_total_ceiling_seconds", hs.total_ceiling_seconds, float)
         # The ceiling can never be tighter than one idle window, or the extension loop would be dead code.
@@ -541,6 +553,9 @@ class GatewayTurnMixin:
         hs.failure_cooldown_seconds = _knob(
             "hygiene_failure_cooldown_seconds", hs.failure_cooldown_seconds, float, allow_zero=True,
         )
+        hs.notify_turn_hold = str(
+            _comp_cfg.get("hygiene_notify_turn_hold", hs.notify_turn_hold)
+        ).strip().lower() in {"true", "1", "yes", "on"}
 
     async def _hmwa_hygiene_settings(self, source, session_key):
         """Resolve model/provider/context-length + hygiene knobs (fail-soft: errors keep defaults).
@@ -550,10 +565,11 @@ class GatewayTurnMixin:
         (compressor keeps running detached, commit fenced); kept below transport idle-timeouts."""
         from gateway.run import _load_gateway_config
         hs = self._HygieneSettings(
-            model="anthropic/claude-sonnet-4.6", threshold_pct=0.85, compression_enabled=True,
+            model="anthropic/claude-sonnet-4.6", threshold_pct=0.85,
+            threshold_tokens_cap=None, compression_enabled=True,
             hard_msg_limit=5000, timeout_seconds=30.0, total_ceiling_seconds=600.0,
             max_turn_hold_seconds=10.0, failure_cooldown_seconds=300.0, config_context_length=None,
-            provider=None, base_url=None, api_key=None, data={},
+            provider=None, base_url=None, api_key=None, data={}, notify_turn_hold=True,
         )
         try:
             hs.data = _load_gateway_config()
@@ -612,7 +628,12 @@ class GatewayTurnMixin:
             hs.model, base_url=hs.base_url or "", api_key=hs.api_key or "",
             config_context_length=hs.config_context_length, provider=hs.provider or "",
         )
-        _compress_token_threshold = int(_hyg_context_length * hs.threshold_pct)
+        _ratio_token_threshold = int(_hyg_context_length * hs.threshold_pct)
+        _compress_token_threshold = _ratio_token_threshold
+        if hs.threshold_tokens_cap is not None:
+            _compress_token_threshold = min(
+                _compress_token_threshold, hs.threshold_tokens_cap, _hyg_context_length,
+            )
         _warn_token_threshold = int(_hyg_context_length * 0.95)
         _msg_count = len(history)
 
@@ -658,9 +679,15 @@ class GatewayTurnMixin:
         if _needs_compress:
             logger.info(
                 "Session hygiene: %s messages, ~%s tokens (%s) — auto-compressing "
-                "(threshold: %s%% of %s = %s tokens)",
+                "(threshold: %s%% of %s = %s tokens%s)",
                 _msg_count, f"{_approx_tokens:,}", _token_source,
                 int(hs.threshold_pct * 100), f"{_hyg_context_length:,}", f"{_compress_token_threshold:,}",
+                (
+                    f", absolute cap {hs.threshold_tokens_cap:,}"
+                    if hs.threshold_tokens_cap is not None
+                    and hs.threshold_tokens_cap < _ratio_token_threshold
+                    else ""
+                ),
             )
         return self._HygienePlan(_needs_compress, _approx_tokens, _msg_count, _warn_token_threshold)
 
@@ -849,9 +876,10 @@ class GatewayTurnMixin:
             "proceeding without compression this turn%s",
             session_entry.session_id, time.monotonic() - attempt.wait_started, _log_suffix,
         )
-        await self._hmwa_hygiene_notify(
-            source, attempt.meta, t("gateway.compress.turnhold_deferred"), "compression-turnhold notice",
-        )
+        if hs.notify_turn_hold:
+            await self._hmwa_hygiene_notify(
+                source, attempt.meta, t("gateway.compress.turnhold_deferred"), "compression-turnhold notice",
+            )
         raise
 
     async def _hmwa_hygiene_on_timeout(self, attempt, hs, session_entry, session_key, source):
@@ -1452,7 +1480,8 @@ class GatewayTurnMixin:
             return f"{header}\n{_quoted}\n\n{response}"
         # Escape ``` inside reasoning so inner fences don't break the outer code block.
         display_reasoning = escape_code_fences_for_display(display_reasoning)
-        return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+        label = "推理过程" if get_language() == "zh" else "Reasoning"
+        return f"💭 **{label}：**\n```\n{display_reasoning}\n```\n\n{response}"
 
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
@@ -1915,6 +1944,34 @@ class GatewayTurnMixin:
             persist_user_display_kind,
         ), _session_env_tokens
 
+    def _apply_qq_menu_reasoning_mode(self, event: MessageEvent, session_key: str) -> None:
+        """Apply QQ's persistent ``深度推理`` switch without touching ``config.yaml``.
+
+        The switch owns only overrides it created in this process. Turning it off restores the
+        profile/model default; unrelated manual overrides are left alone unless this switch had
+        previously taken control of the same session lane.
+        """
+        metadata = event.metadata if isinstance(getattr(event, "metadata", None), dict) else {}
+        modes = metadata.get("qq_menu_modes") if isinstance(metadata.get("qq_menu_modes"), dict) else None
+        if modes is None or event.source.platform != Platform.QQBOT or not session_key:
+            return
+        managed = getattr(self, "_qq_menu_reasoning_sessions", None)
+        if not isinstance(managed, set):
+            managed = set()
+            self._qq_menu_reasoning_sessions = managed
+        desired = {"enabled": True, "effort": "max"}
+        state = self._peek_session_state(session_key)
+        current = state.conversation.reasoning_override if state is not None else None
+        if bool(modes.get("deep_reasoning")):
+            if current != desired:
+                self._set_session_reasoning_override(session_key, desired)
+                self._evict_cached_agent(session_key)
+            managed.add(session_key)
+        elif session_key in managed:
+            self._set_session_reasoning_override(session_key, None)
+            self._evict_cached_agent(session_key)
+            managed.discard(session_key)
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -1931,6 +1988,7 @@ class GatewayTurnMixin:
         if resolved is None:
             return
         source, session_entry, session_key = resolved
+        self._apply_qq_menu_reasoning_mode(event, session_key)
         prepared, _session_env_tokens = await self._hmwa_prepare_turn(
             event, source, session_entry, session_key, _quick_key, run_generation,
         )
@@ -1959,6 +2017,8 @@ class GatewayTurnMixin:
                 session_id=_run_start_session_id, session_key=session_key,
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
+                inbound_author_text=getattr(event, "raw_author_text", None),
+                inbound_internal=bool(getattr(event, "internal", False)),
                 channel_prompt=event.channel_prompt, moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=prepared.persist_user_message,
                 persist_user_timestamp=prepared.persist_user_timestamp,
@@ -2575,8 +2635,11 @@ class GatewayTurnMixin:
         )
         from gateway.display_config import resolve_display_setting
         from gateway.status_phrases import choose_status_phrase, resolve_status_phrase_catalog
+        from gateway.user_phrases import resolve_user_phrase
+        from hermes_constants import get_hermes_home
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        profile_home = get_hermes_home()
         enabled_toolsets, disabled_toolsets = self._resolve_turn_toolsets(user_config, source, platform_key)
         adapter = self._adapter_for_source(source)
         # display.platforms.<platform>.<key> → display.<key> → built-in platform defaults.
@@ -2637,6 +2700,12 @@ class GatewayTurnMixin:
                 logger.debug("generic status phrase selection failed: %s", _phrase_err)
                 return "still on it" if kind in {"heartbeat", "waiting", "long_running", "status"} else "one sec"
 
+        def _user_phrase(key: str, **values: Any) -> str:
+            return resolve_user_phrase(
+                key, user_config=user_config, platform_key=platform_key,
+                home=profile_home, **values,
+            )
+
         # Webhooks can't edit messages, so tool progress / log mode are off there.
         is_webhook = source.platform == Platform.WEBHOOK
         tool_progress_enabled = progress_mode not in {"off", "log"} and not is_webhook
@@ -2678,7 +2747,8 @@ class GatewayTurnMixin:
             interim_assistant_messages_enabled=interim_assistant_messages_enabled,
             _thinking_enabled=_thinking_enabled, _native_slack_task_cards=_native_slack_task_cards,
             needs_progress_queue=tool_progress_enabled or _thinking_enabled or _native_slack_task_cards,
-            _generic_status_phrase=_generic_status_phrase,
+            _generic_status_phrase=_generic_status_phrase, _user_phrase=_user_phrase,
+            _phrase_home=profile_home,
         )
 
     # _RunAgentDisplay fields copied verbatim onto the TurnContext.
@@ -2687,6 +2757,7 @@ class GatewayTurnMixin:
         "progress_grouping", "tool_progress_enabled", "log_queue", "resolve_display_setting",
         "user_config", "enabled_toolsets", "disabled_toolsets", "log_mode_enabled",
         "interim_assistant_messages_enabled", "needs_progress_queue", "_native_slack_task_cards",
+        "_user_phrase",
     )
 
     def _run_agent_build_turn_context(
@@ -3430,7 +3501,8 @@ class GatewayTurnMixin:
         updated_history = result.get("messages", history)
         next_source, next_message, next_session_key = source, pending, session_key
         # message_type is carried into the recursive call so queued voice turns can stream TTS.
-        next_message_id = next_channel_prompt = next_message_type = None
+        next_message_id = next_inbound_message_id = next_channel_prompt = next_message_type = None
+        next_inbound_author_text = next_inbound_internal = None
         # See #60671.
         if pending_event is not None:
             next_source = getattr(pending_event, "source", None) or source
@@ -3455,6 +3527,11 @@ class GatewayTurnMixin:
             if next_message is None:
                 return result
             next_message_id = self._reply_anchor_for_event(pending_event)
+            next_inbound_message_id = (
+                str(pending_event.message_id) if getattr(pending_event, "message_id", None) else None
+            )
+            next_inbound_author_text = getattr(pending_event, "raw_author_text", None)
+            next_inbound_internal = bool(getattr(pending_event, "internal", False))
             next_channel_prompt = getattr(pending_event, "channel_prompt", None)
             next_message_type = getattr(pending_event, "message_type", None)
 
@@ -3490,7 +3567,9 @@ class GatewayTurnMixin:
             message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
             source=next_source, session_id=session_id, session_key=next_session_key,
             run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
-            event_message_id=next_message_id, channel_prompt=next_channel_prompt,
+            event_message_id=next_message_id, inbound_message_id=next_inbound_message_id,
+            inbound_author_text=next_inbound_author_text, inbound_internal=next_inbound_internal,
+            channel_prompt=next_channel_prompt,
             message_type=next_message_type,
         )
         return _preserve_queued_followup_history_offset(result, followup_result)
@@ -3738,18 +3817,20 @@ class GatewayTurnMixin:
             _a = self._agent_activity_summary(agent_holder[0])
             with suppress(Exception):
                 if _a:
-                    _parts = []
-                    if _want_iteration_detail:
-                        _parts.append(f"iteration {_a['api_call_count']}/{_a['max_iterations']}")
+                    from gateway.user_phrases import format_heartbeat_details
+                    _iteration = _a["api_call_count"] if _want_iteration_detail else None
+                    _max_iterations = _a["max_iterations"] if _want_iteration_detail else None
                     _action = _a.get("current_tool") or _a.get("last_activity_desc")
-                    if _action:
-                        _parts.append(str(_action))
-                    if _parts:
-                        _status_detail = " — " + ", ".join(_parts)
+                    _status_detail = format_heartbeat_details(
+                        user_config=disp.user_config, iteration=_iteration,
+                        max_iterations=_max_iterations, tool_name=_action, home=disp._phrase_home,
+                    )
             _heartbeat_text = (
                 disp._generic_status_phrase("status")
                 if _long_running_mode == "generic"
-                else f"⏳ Working — {_elapsed_mins} min{_status_detail}"
+                else disp._user_phrase(
+                    "heartbeat.working", minutes=_elapsed_mins, details=_status_detail,
+                )
             )
             try:
                 _notify_res = None
@@ -3776,6 +3857,7 @@ class GatewayTurnMixin:
         source: SessionSource, session_id: str, session_key: str = None,
         run_generation: Optional[int] = None, _interrupt_depth: int = 0,
         event_message_id: Optional[str] = None, inbound_message_id: Optional[str] = None,
+        inbound_author_text: Optional[str] = None, inbound_internal: Optional[bool] = None,
         channel_prompt: Optional[str] = None, moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
         persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
@@ -3798,6 +3880,7 @@ class GatewayTurnMixin:
             run_generation=run_generation, context_prompt=context_prompt, history=history,
             session_id=session_id, _interrupt_depth=_interrupt_depth,
             event_message_id=event_message_id, inbound_message_id=inbound_message_id,
+            inbound_author_text=inbound_author_text, inbound_internal=inbound_internal,
             channel_prompt=channel_prompt, moa_config=moa_config,
             persist_user_message=persist_user_message,
             persist_user_timestamp=persist_user_timestamp,

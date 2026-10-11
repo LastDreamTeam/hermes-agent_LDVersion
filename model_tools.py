@@ -715,6 +715,19 @@ def _pre_dispatch_guards(function_name: str, function_args: Dict[str, Any], skip
                 function_args = modified_args
         except Exception as _hook_err:
             logger.debug("pre_tool_call hook error: %s", _hook_err)
+            try:
+                from tools.approval import is_owner_high_impact_tool_name
+                if is_owner_high_impact_tool_name(function_name):
+                    block_message = (
+                        "BLOCKED: owner high-impact approval policy could not be evaluated; "
+                        "do not retry or bypass it."
+                    )
+            except Exception:
+                # If even the security classifier is unavailable, fail closed:
+                # a broken policy runtime must not silently execute tools.
+                block_message = (
+                    "BLOCKED: pre_tool_call security policy is unavailable; do not retry or bypass it."
+                )
         if block_message is not None:
             return function_args, (tool_error(block_message), "plugin_block", block_message)
 

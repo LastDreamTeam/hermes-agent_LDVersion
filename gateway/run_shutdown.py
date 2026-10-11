@@ -16,7 +16,7 @@ import shlex
 import sys
 import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager, nullcontext, suppress
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
@@ -696,7 +696,6 @@ class GatewayShutdownMixin:
         except Exception as e:
             logger.debug("Cron interrupt notification unavailable: %s", e)
             return 0
-        action = "restarting" if self._restart_requested else "shutting down"
         notified: set = set()
         for job_id in job_ids:
             try:
@@ -710,11 +709,6 @@ class GatewayShutdownMixin:
             except Exception as e:
                 logger.debug("Cron interrupt targets unresolved for %s: %s", job_id, e)
                 continue
-            msg = (
-                f"⚠️ Cron job '{job.get('name') or job_id}' was interrupted — "
-                f"the gateway is {action} and killed the run before it "
-                "finished. No result was produced for this run."
-            )
             for target in targets or ():
                 try:
                     platform = Platform(str(target.get("platform", "")).lower())
@@ -723,6 +717,11 @@ class GatewayShutdownMixin:
                 adapter = self.adapters.get(platform)
                 if adapter is None or not self._restart_notification_allowed(platform):
                     continue
+                msg = self._shutdown_user_phrase(
+                    "shutdown.cron_interrupted_restart" if self._restart_requested
+                    else "shutdown.cron_interrupted_stop",
+                    platform=platform, job_name=job.get("name") or job_id,
+                )
                 chat_id = str(target.get("chat_id"))
                 thread_id = target.get("thread_id")
                 dedup_key = (job_id, *_notice_target_key(platform.value, chat_id, thread_id))
@@ -759,6 +758,31 @@ class GatewayShutdownMixin:
             return None
         return None, _parsed["platform"], _parsed["chat_id"], _parsed.get("thread_id")
 
+    def _shutdown_user_phrase(
+        self, key: str, *, source=None, platform: Optional[Platform] = None, **values: Any,
+    ) -> str:
+        """Resolve a shutdown notice at its final display boundary, profile-aware and fail-safe."""
+        from gateway.run import _gateway_config_home, _load_gateway_config, _platform_config_key
+        from gateway.user_phrases import ENGLISH_TEMPLATES, resolve_user_phrase
+
+        try:
+            scope = self._profile_scope_for_source(source) if source is not None else nullcontext()
+            with scope:
+                user_config = _load_gateway_config()
+                routed_platform = platform or getattr(source, "platform", None)
+                platform_key = _platform_config_key(routed_platform) if routed_platform is not None else None
+                return resolve_user_phrase(
+                    key, user_config=user_config, platform_key=platform_key,
+                    home=_gateway_config_home(), **values,
+                )
+        except Exception as exc:
+            logger.debug("Shutdown phrase resolution failed for %s: %s", key, exc)
+            template = ENGLISH_TEMPLATES.get(key, key)
+            try:
+                return template.format(**values)
+            except Exception:
+                return template
+
     async def _send_shutdown_notice(
         self, adapter, chat_id: str, msg: str, kind: str, platform_str: str, **send_kwargs
     ) -> bool:
@@ -792,12 +816,7 @@ class GatewayShutdownMixin:
         Called at the start of stop() while adapters are connected; send failures never block shutdown.
         """
         restart_source = self._restart_command_source if self._restart_requested else None
-        msg = "⚠️ Gateway shutting down — Your current task will be interrupted."
-        if self._restart_requested:
-            msg = (
-                "⚠️ Gateway restarting — Your current task will be interrupted. "
-                "Send any message after restart and I'll try to resume where you left off."
-            )
+        phrase_key = "shutdown.restart" if self._restart_requested else "shutdown.stop"
         restart_key = None
         if restart_source is not None:
             with suppress(Exception):
@@ -827,6 +846,7 @@ class GatewayShutdownMixin:
                     platform, chat_id, thread_id, chat_type=getattr(source, "chat_type", None),
                     reply_to_message_id=reply_to_message_id, adapter=adapter,
                 )
+                msg = self._shutdown_user_phrase(phrase_key, source=source, platform=platform)
             except Exception as e:
                 logger.debug("Failed to send shutdown notification to %s:%s: %s", platform_str, chat_id, e)
                 continue
@@ -857,6 +877,7 @@ class GatewayShutdownMixin:
                 continue
             try:
                 metadata = self._thread_metadata_for_target(platform, home.chat_id, home.thread_id, adapter=adapter)
+                msg = self._shutdown_user_phrase(phrase_key, platform=platform)
             except Exception as e:
                 logger.debug(
                     "Failed to send shutdown notification to home channel %s:%s: %s", platform.value, home.chat_id, e,

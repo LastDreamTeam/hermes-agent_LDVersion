@@ -14,7 +14,7 @@ import os
 import shlex
 from typing import Optional, Union
 
-from agent.i18n import t
+from agent.i18n import get_language, t
 from agent.turn_context import extract_api_content_sidecar
 from gateway.config import Platform
 from gateway.platforms.base import EphemeralReply, MessageEvent, MessageType
@@ -976,7 +976,8 @@ class GatewaySessionCommandsMixin:
         except ValueError as exc:
             return t("gateway.resume.parse_error", error=exc)
         if search_query == "":
-            return "Usage: `/sessions search <query>`"
+            return ("用法：`/sessions search <关键词>`" if get_language() == "zh"
+                    else "Usage: `/sessions search <query>`")
         if target:
             return await self._handle_resume_command(dataclasses.replace(event, text=f"/resume {target}"))
         source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
@@ -986,7 +987,11 @@ class GatewaySessionCommandsMixin:
         cross_origin = include_all and self._resume_caller_is_admin(source)
         scope_notice = None
         if include_all and not cross_origin:
-            scope_notice = "_Note: `all` (cross-chat listing) requires a configured admin; showing this chat's sessions only._"
+            scope_notice = (
+                "_注意：跨聊天列出全部会话需要管理员权限；当前仅显示此聊天的会话。_"
+                if get_language() == "zh" else
+                "_Note: `all` (cross-chat listing) requires a configured admin; showing this chat's sessions only._"
+            )
         current_entry = await self.async_session_store.get_or_create_session(source)
         rows = await asyncio.to_thread(
             query_session_listing, getattr(self._session_db, "_db", self._session_db),
@@ -1001,9 +1006,11 @@ class GatewaySessionCommandsMixin:
             rows = [row for row in rows if await self._resume_row_visible(source, row, allow_all=False)]
         rows = rows[:10]
         if search_query:
-            title = f"Sessions matching “{search_query}”"
+            title = (f"匹配“{search_query}”的会话" if get_language() == "zh"
+                     else f"Sessions matching “{search_query}”")
         else:
-            title = "Sessions" if include_unnamed else "Named Sessions"
+            title = (("全部会话" if include_unnamed else "已命名会话") if get_language() == "zh"
+                     else ("Sessions" if include_unnamed else "Named Sessions"))
         return format_gateway_session_listing(rows, include_source=cross_origin, title=title,
                                               notice=scope_notice)
 

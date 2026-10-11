@@ -19,6 +19,38 @@ approval:
   cancelled:       "      ✗ 취소됨"
   blocklist_message: "이 명령은 무조건 차단 목록에 있으며 승인할 수 없습니다."
 
+context_breakdown:
+  category:
+    system_prompt: "System prompt"
+    tool_definitions: "Tool definitions"
+    rules: "Rules"
+    skills: "Skills"
+    mcp: "MCP"
+    subagent_definitions: "Subagent definitions"
+    memory: "Memory"
+    conversation: "Conversation"
+  estimated_usage: "Estimated usage by category"
+  no_data: "  (no data yet — send a message first)"
+  free_space: "Free space"
+  token_unit: "tokens"
+  toolset_row: "  {toolset} {count} tools {tokens} tokens"
+  skill_row: "  {name} index {index_tokens}  SKILL.md {skill_tokens} tokens"
+  not_available: "n/a"
+  more_rows: "  … and {count} more"
+  toolsets_title: "Toolsets by schema cost (largest first)"
+  skills_title: "Skills by cost (index = always-on; SKILL.md = cost when loaded)"
+  window_usage: "Context window: {used} / {total} tokens ({pct}%)"
+  details_hint: "Use /context all for per-skill and per-toolset costs."
+
+cron_delivery:
+  header: "Cronjob Response: {task_name}"
+  job_id: "(job_id: {job_id})"
+  footer: "To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+
+protected_instruction:
+  description: "Write to protected agent-instruction file(s): {targets}. These files steer future agent behavior; approval is always required (not bypassed by auto-approve)."
+  display: "<write to {targets}>"
+
 gateway:
   approval_expired: "⚠️ 승인이 만료되었습니다 (에이전트가 더 이상 대기하지 않습니다). 에이전트에게 다시 시도하도록 요청하세요."
   draining:         "⏳ 재시작 전에 활성 에이전트 {count}명을 정리하는 중..."

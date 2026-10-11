@@ -99,6 +99,26 @@ def reset_current_observability_context(tokens: _Tokens) -> None:
     _approval_turn_id.reset(turn_token)
 
 
+def get_current_turn_id() -> str:
+    """Return the active turn correlation id, or an empty string when unbound."""
+    return _approval_turn_id.get() or ""
+
+
+def get_current_tool_call_id() -> str:
+    """Return the active tool-call correlation id, or an empty string.
+
+    Security plugins use this opaque value to bind a one-shot external-action
+    grant to the exact invocation that requested human approval.  It is an
+    identifier, not proof of approval by itself.
+    """
+    return _approval_tool_call_id.get() or ""
+
+
+def get_current_observability_session_id() -> str:
+    """Return Hermes' active observability session id, or an empty string."""
+    return _approval_session_id.get() or ""
+
+
 def get_current_session_key(default: str = "default") -> str:
     """Return the active session key: approval contextvar → session_context → os.environ."""
     if session_key := _approval_session_key.get():

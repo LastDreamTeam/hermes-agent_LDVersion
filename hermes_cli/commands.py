@@ -440,8 +440,115 @@ def _is_gateway_available(cmd: CommandDef, config_overrides: set[str] | None = N
     return cmd.name in overrides
 
 
+_ZH_GATEWAY_COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "start": "确认平台启动探测，不发送回复",
+    "new": "开始新会话（新的会话 ID 和历史）",
+    "topic": "启用或查看 Telegram 私聊话题会话",
+    "clear": "清屏并开始新会话",
+    "redraw": "强制完整重绘界面（修复终端错位）",
+    "history": "查看对话历史",
+    "save": "导出当前对话（单独使用 /save 可查看用法）",
+    "retry": "重试上一条消息（重新发送给代理）",
+    "prompt": "在编辑器中编写下一条 Markdown 提示后发送",
+    "undo": "回退若干轮用户消息并重新提问（默认 1 轮）",
+    "title": "设置当前会话标题",
+    "handoff": "把此会话转交到消息平台",
+    "branch": "从当前会话创建独立分支",
+    "worktree": "查看、创建或清理隔离的 Git 工作树",
+    "compress": "压缩对话上下文（here [N] 保留最近 N 轮；--preview 仅预览）",
+    "rollback": "列出或恢复文件系统检查点（默认保留手工修改）",
+    "snapshot": "创建或恢复 Hermes 配置与状态快照",
+    "export": "导出配置档案为可分享压缩包",
+    "import": "把共享档案导入为新配置档案",
+    "stop": "停止所有正在运行的后台进程",
+    "pause": "暂停新工作（紧急停止）；/pause off 恢复",
+    "approve": "批准待处理的危险命令",
+    "deny": "拒绝待处理的危险命令（可附原因）",
+    "bg": "在独立后台会话中运行任务",
+    "btw": "不打断当前任务地追问旁支问题",
+    "agents": "查看活跃代理与运行中的任务",
+    "journey": "打开学习历程时间线",
+    "queue": "把提示排入下一轮队列（不打断当前任务）",
+    "steer": "在下次工具调用后注入消息（不打断）",
+    "goal": "设置 Hermes 跨轮持续推进的长期目标",
+    "heartbeat": "设置会话空闲时再次进入的周期提示",
+    "refine": "复盘当前对话并把经验保存到记忆或技能",
+    "review": "启动独立子代理审查刚才的工作",
+    "loop": "按周期在此会话重复运行提示",
+    "plan": "把实施计划写入 .hermes/plans/，不执行",
+    "moa": "使用默认多代理混合方案运行一次，再恢复模型",
+    "subgoal": "管理当前目标的附加验收条件",
+    "status": "查看会话、模型、令牌与上下文状态",
+    "egress": "查看 Docker 出站代理状态",
+    "context": "查看上下文占用、分类、压缩统计与吞吐量",
+    "whoami": "查看当前斜杠命令权限",
+    "profile": "查看当前档案名称与主目录",
+    "sethome": "把此聊天设为主通知频道",
+    "resume": "恢复一个已命名的历史会话",
+    "sessions": "浏览并恢复历史会话",
+    "config": "查看当前配置",
+    "model": "切换模型（默认仅当前会话；--global 持久化）",
+    "codex-runtime": "切换 OpenAI/Codex 模型的 Codex 应用服务器运行时",
+    "personality": "设置预定义人格",
+    "statusbar": "开关上下文与模型状态栏",
+    "battery": "开关状态栏彩色电量指示器",
+    "timestamps": "开关消息与历史中的时间戳",
+    "diff": "查看工作目录中的 Git 变更",
+    "verbose": "切换工具进度显示级别",
+    "focus": "开关专注视图（仅显示提问和最终回复）",
+    "footer": "开关最终回复中的网关运行元数据",
+    "yolo": "开关 YOLO 模式（跳过危险命令审批）",
+    "approvals": "查看或设置危险命令持久审批模式",
+    "reasoning": "管理推理强度与显示方式",
+    "fast": "切换 OpenAI 优先处理或 Anthropic 快速模式",
+    "skin": "查看或切换显示主题",
+    "indicator": "选择终端忙碌指示器样式",
+    "voice": "开关语音模式",
+    "wake": "开关“Hey Hermes”唤醒词监听",
+    "busy": "设置 Hermes 工作时如何处理新消息",
+    "tools": "管理工具：列出、禁用或启用",
+    "toolsets": "列出可用工具集",
+    "skills": "搜索、安装、查看或管理技能",
+    "memory": "审查待写记忆或切换审批闸门",
+    "bundles": "列出技能组合包",
+    "pet": "开关或领养 Petdex 吉祥物",
+    "hatch": "根据描述生成新的 Petdex 宠物",
+    "learn": "从目录、网址、对话或笔记学习可复用技能",
+    "init": "扫描仓库并生成或更新 AGENTS.md",
+    "cron": "管理定时任务",
+    "suggestions": "审查建议的自动化任务",
+    "blueprint": "根据蓝图模板设置自动化任务",
+    "curator": "后台维护技能",
+    "kanban": "多配置档案协作看板",
+    "reload": "把 .env 变量重新载入当前会话",
+    "reload-mcp": "从配置重新载入 MCP 服务",
+    "reload-skills": "重新扫描新增或移除的技能",
+    "browser": "把浏览器工具连接到 Chromium 浏览器",
+    "plugins": "列出已安装插件及状态",
+    "commands": "分页浏览全部命令与技能",
+    "help": "查看可用命令（可筛选技能或文本）",
+    "palette": "打开模糊搜索命令面板",
+    "restart": "等待活跃任务排空后平滑重启网关",
+    "usage": "查看令牌用量与速率限制",
+    "subscription": "查看 Nous 套餐并在浏览器中管理",
+    "topup": "查看 Nous 余额并在门户管理账单",
+    "insights": "查看用量洞察与分析",
+    "platforms": "查看网关与消息平台状态",
+    "platform": "暂停、恢复或列出异常消息平台",
+    "copy": "复制上一条助手回复",
+    "paste": "附加剪贴板中的图片",
+    "image": "为下一条提示附加本地图片",
+    "update": "把 Hermes Agent 更新到最新版",
+    "version": "查看 Hermes Agent 版本",
+    "debug": "上传调试报告并获取分享链接",
+    "quit": "退出 CLI（--delete 同时删除会话历史）",
+}
+
+
 def gateway_help_lines() -> list[str]:
     """Generate gateway help text lines from the registry."""
+    from agent.i18n import get_language
+    chinese = get_language() == "zh"
     overrides = _resolve_config_gates()
     lines: list[str] = []
     for cmd in COMMAND_REGISTRY:
@@ -451,8 +558,13 @@ def gateway_help_lines() -> list[str]:
         # Skip internal aliases like reload_mcp (underscore variant of the name).
         alias_parts = [f"`/{a}`" for a in cmd.aliases
                        if not (a.replace("-", "_") == cmd.name.replace("-", "_") and a != cmd.name)]
-        alias_note = f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
-        lines.append(f"`/{cmd.name}{args}` -- {cmd.description}{alias_note}")
+        alias_note = (
+            f"（别名：{', '.join(alias_parts)}）" if chinese and alias_parts
+            else f" (alias: {', '.join(alias_parts)})" if alias_parts else ""
+        )
+        description = _ZH_GATEWAY_COMMAND_DESCRIPTIONS.get(cmd.name, cmd.description) if chinese else cmd.description
+        lines.append(f"`/{cmd.name}{args}` —— {description}{alias_note}" if chinese
+                     else f"`/{cmd.name}{args}` -- {description}{alias_note}")
     return lines
 
 

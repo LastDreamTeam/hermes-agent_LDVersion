@@ -12,19 +12,21 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from agent.i18n import t
+
 _SKILLS_BLOCK_RE = re.compile(r"<available_skills>.*?</available_skills>", re.DOTALL)
 _SUBAGENT_TOOL_NAMES = frozenset({"delegate_task"})
 
-# id -> (label, dashboard color, /context glyph); declaration order is display order.
+# id -> (i18n label key, dashboard color, /context glyph); declaration order is display order.
 _CATEGORIES = {
-    "system_prompt": ("System prompt", "var(--context-usage-system)", "■"),
-    "tool_definitions": ("Tool definitions", "var(--context-usage-tools)", "▣"),
-    "rules": ("Rules", "var(--context-usage-rules)", "▩"),
-    "skills": ("Skills", "var(--context-usage-skills)", "▤"),
-    "mcp": ("MCP", "var(--context-usage-mcp)", "▥"),
-    "subagent_definitions": ("Subagent definitions", "var(--context-usage-subagents)", "▦"),
-    "memory": ("Memory", "var(--context-usage-memory)", "▧"),
-    "conversation": ("Conversation", "var(--context-usage-conversation)", "▨"),
+    "system_prompt": ("context_breakdown.category.system_prompt", "var(--context-usage-system)", "■"),
+    "tool_definitions": ("context_breakdown.category.tool_definitions", "var(--context-usage-tools)", "▣"),
+    "rules": ("context_breakdown.category.rules", "var(--context-usage-rules)", "▩"),
+    "skills": ("context_breakdown.category.skills", "var(--context-usage-skills)", "▤"),
+    "mcp": ("context_breakdown.category.mcp", "var(--context-usage-mcp)", "▥"),
+    "subagent_definitions": ("context_breakdown.category.subagent_definitions", "var(--context-usage-subagents)", "▦"),
+    "memory": ("context_breakdown.category.memory", "var(--context-usage-memory)", "▧"),
+    "conversation": ("context_breakdown.category.conversation", "var(--context-usage-conversation)", "▨"),
 }
 _FREE_GLYPH = "·"
 _GRID_COLUMNS = 20
@@ -135,8 +137,8 @@ def compute_session_context_breakdown(agent: Any, messages: Optional[List[dict]]
 
     return {
         "categories": [
-            {"color": color, "id": category_id, "label": label, "tokens": tokens_by_id[category_id]}
-            for category_id, (label, color, _glyph_) in _CATEGORIES.items()
+            {"color": color, "id": category_id, "label": t(label_key), "tokens": tokens_by_id[category_id]}
+            for category_id, (label_key, color, _glyph_) in _CATEGORIES.items()
             if tokens_by_id[category_id] > 0
         ],
         "context_max": context_max,
@@ -207,21 +209,27 @@ def render_context_category_lines(payload: Dict[str, Any]) -> List[str]:
     estimated_total = int(payload.get("estimated_total") or 0)
     denom = context_max or estimated_total
 
-    lines = ["Estimated usage by category"]
+    lines = [t("context_breakdown.estimated_usage")]
     if not categories:
-        return [*lines, "  (no data yet — send a message first)"]
-    width = max(len("Free space"), *(len(str(cat.get("label") or "")) for cat in categories))
+        return [*lines, t("context_breakdown.no_data")]
+    free_space = t("context_breakdown.free_space")
+    token_unit = t("context_breakdown.token_unit")
+    width = max(len(free_space), *(len(str(cat.get("label") or "")) for cat in categories))
     for cat in categories:
         tokens, label = int(cat.get("tokens") or 0), str(cat.get("label") or cat.get("id") or "")
-        lines.append(f"{_glyph(cat)} {label:<{width}} {tokens:>9,} tokens {tokens / denom * 100 if denom else 0.0:>5.1f}%")
+        lines.append(f"{_glyph(cat)} {label:<{width}} {tokens:>9,} {token_unit} {tokens / denom * 100 if denom else 0.0:>5.1f}%")
     if context_max > 0:
         free = max(0, context_max - estimated_total)
-        lines.append(f"{_FREE_GLYPH} {'Free space':<{width}} {free:>9,} tokens {free / context_max * 100:>5.1f}%")
+        lines.append(f"{_FREE_GLYPH} {free_space:<{width}} {free:>9,} {token_unit} {free / context_max * 100:>5.1f}%")
     return lines
 
 
 def _toolset_row(group: Dict[str, Any]) -> str:
-    return f"  {group['toolset']:<24} {group['tool_count']:>3} tools {group['schema_tokens']:>8,} tokens"
+    return t(
+        "context_breakdown.toolset_row",
+        toolset=f"{group['toolset']:<24}", count=f"{group['tool_count']:>3}",
+        tokens=f"{group['schema_tokens']:>8,}",
+    )
 
 
 def _skill_row(entry: Dict[str, Any]) -> str:
@@ -229,8 +237,11 @@ def _skill_row(entry: Dict[str, Any]) -> str:
     if len(name) > 28:
         name = name[:27] + "…"
     md = entry.get("skill_md_tokens")
-    md_str = f"{md:>8,}" if md is not None else f"{'n/a':>8}"
-    return f"  {name:<28} index {entry['index_tokens']:>6,}  SKILL.md {md_str} tokens"
+    md_str = f"{md:>8,}" if md is not None else f"{t('context_breakdown.not_available'):>8}"
+    return t(
+        "context_breakdown.skill_row", name=f"{name:<28}",
+        index_tokens=f"{entry['index_tokens']:>6,}", skill_tokens=md_str,
+    )
 
 
 def _table(lines: List[str], title: str, rows: List[Dict[str, Any]], fmt) -> None:
@@ -242,14 +253,14 @@ def _table(lines: List[str], title: str, rows: List[Dict[str, Any]], fmt) -> Non
     lines.append(title)
     lines.extend(fmt(row) for row in rows[:_DETAILS_TABLE_LIMIT])
     if len(rows) > _DETAILS_TABLE_LIMIT:
-        lines.append(f"  … and {len(rows) - _DETAILS_TABLE_LIMIT} more")
+        lines.append(t("context_breakdown.more_rows", count=len(rows) - _DETAILS_TABLE_LIMIT))
 
 
 def render_context_details_lines(details: Dict[str, Any]) -> List[str]:
     """Render the expanded ``/context all`` per-skill / per-toolset tables."""
     lines: List[str] = []
-    _table(lines, "Toolsets by schema cost (largest first)", details.get("toolsets") or [], _toolset_row)
-    _table(lines, "Skills by cost (index = always-on; SKILL.md = cost when loaded)", details.get("skills") or [], _skill_row)
+    _table(lines, t("context_breakdown.toolsets_title"), details.get("toolsets") or [], _toolset_row)
+    _table(lines, t("context_breakdown.skills_title"), details.get("skills") or [], _skill_row)
     return lines
 
 
@@ -267,10 +278,10 @@ def render_context_breakdown_lines(
     context_max = int(payload.get("context_max") or 0)
     if context_max > 0:
         used, pct = int(payload.get("context_used") or 0), int(payload.get("context_percent") or 0)
-        lines.extend(["", f"Context window: {used:,} / {context_max:,} tokens ({pct}%)"])
+        lines.extend(["", t("context_breakdown.window_usage", used=f"{used:,}", total=f"{context_max:,}", pct=pct)])
 
     if details is None:
-        lines.extend(["", "Use /context all for per-skill and per-toolset costs."])
+        lines.extend(["", t("context_breakdown.details_hint")])
     elif detail_lines := render_context_details_lines(details):
         lines.extend(["", *detail_lines])
     return lines

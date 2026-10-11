@@ -429,10 +429,16 @@ def _cmd_list(args: argparse.Namespace) -> int:
         all_boards = []
     if len(all_boards) > 1:
         other_count = len(all_boards) - 1
-        print(f"Board: {kb.get_current_board()} ({other_count} other board{'s' if other_count != 1 else ''} — "
-              f"`hermes kanban boards list`)\n")
+        from agent.i18n import get_language
+        if get_language() == "zh":
+            print(f"看板：{kb.get_current_board()}（另有 {other_count} 个看板——"
+                  f"`hermes kanban boards list`）\n")
+        else:
+            print(f"Board: {kb.get_current_board()} ({other_count} other board{'s' if other_count != 1 else ''} — "
+                  f"`hermes kanban boards list`)\n")
     if not tasks:
-        print("(no matching tasks)")
+        from agent.i18n import get_language
+        print("（没有匹配的任务）" if get_language() == "zh" else "(no matching tasks)")
         return 0
     for t in tasks:
         print(_fmt_task_line(t))

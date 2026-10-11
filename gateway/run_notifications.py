@@ -692,7 +692,6 @@ class GatewayNotificationsMixin:
         """
         delivered: set[tuple[str, str, Optional[str]]] = set()
         skipped = skip_targets or set()
-        message = "♻️ Gateway online — Hermes is back and ready."
         for platform, platform_cfg, home, transport in self._home_channel_transports():
             if not platform_cfg.gateway_restart_notification:
                 logger.info(
@@ -703,6 +702,18 @@ class GatewayNotificationsMixin:
             target = _notice_target_key(platform.value, home.chat_id, home.thread_id)
             if target in skipped or target in delivered:
                 continue
+            from gateway.run import _gateway_config_home, _load_gateway_config, _platform_config_key
+            from gateway.user_phrases import ENGLISH_TEMPLATES, resolve_user_phrase
+            try:
+                message = resolve_user_phrase(
+                    "startup.online",
+                    user_config=_load_gateway_config(),
+                    platform_key=_platform_config_key(platform),
+                    home=_gateway_config_home(),
+                )
+            except Exception as exc:
+                logger.debug("Startup phrase resolution failed for %s: %s", platform.value, exc)
+                message = ENGLISH_TEMPLATES["startup.online"]
             if await self._send_home_channel_message(
                 platform, home, transport, message, "Home-channel startup notification failed for %s:%s: %s",
             ):

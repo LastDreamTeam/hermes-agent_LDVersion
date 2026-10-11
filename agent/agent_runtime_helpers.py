@@ -2177,7 +2177,17 @@ def _pre_tool_block_message(agent, function_name, function_args, effective_task_
         )
         return block_message, (modified_args if modified_args is not None else function_args)
     except Exception:
-        return None, function_args
+        try:
+            from tools.approval import is_owner_high_impact_tool_name
+            if not is_owner_high_impact_tool_name(function_name):
+                return None, function_args
+        except Exception:
+            pass
+        return (
+            "BLOCKED: owner high-impact approval policy could not be evaluated; "
+            "do not retry or bypass it.",
+            function_args,
+        )
 
 
 def invoke_tool(agent, function_name: str, function_args: dict, effective_task_id: str,
@@ -2871,16 +2881,65 @@ _TRAILING_CONTINUE_INTENT_RE = re.compile(
     r"[^.!?\n]{0,100}[.:\u2026]?\s*$", re.IGNORECASE,
 )
 
+# Chinese models commonly end a turn with a short, explicit immediate-action
+# promise (for example ``我这就发``) rather than an English ``I'll now ...``.
+# Keep this detector deliberately narrower than general future tense: it needs
+# an immediate first-person prefix, a concrete action verb in the SAME clause,
+# and must occur near the reply tail.  The single-character fallbacks use small
+# lexical boundaries so nouns such as ``问题`` and verbs such as ``发现`` are not
+# mistaken for ``问`` / ``发``.  This matches the primary bot's natural habit of
+# reporting completed work as ``我先查了，没问题`` without forcing her to change
+# persona or wording.
+_TRAILING_ZH_ACTION_RE_FRAGMENT = (
+    r"(?:发送|转发|通知|转告|联系|询问|回复|提醒|跟进|调用|运行|执行"
+    r"|启动|重启|停止|创建|新建|建立|修改|更新|部署|提交|上传|下载"
+    r"|安装|配置|修复|接入|删除|清理|同步|写入|保存|移动|复制|打开|关闭"
+    r"|检查|查看|查询|查证|检索|搜索|读取|核对|确认|验证|测试|排查|调查"
+    r"|分析|整理|处理"
+    r"|问(?=$|[。！？!?，,；;\s]|一下|下|问|清楚|明白|你|他|她|它|主人|队友|GPT|Grok|gpt|grok|@)"
+    r"|写(?=$|[。！？!?，,；;\s]|一下|下|一版|一份|一个|进|到|好|完|文|代|报|说)"
+    r"|(?<!查)看(?=$|[。！？!?，,；;\s]|一下|下|一眼|看|完|日|状|结|配|服|代|文|图|这|那|有|清|明|懂)"
+    r"|查(?=$|[。！？!?，,；;\s]|一下|下|查|日|状|配|服|资|记|问|清|证|明|QQ|群)"
+    r"|发(?=$|[。！？!?，,；;\s]|一下|下|给|到|出|个|一份|一张|一条|消|通|邮|语|文|图|报))"
+)
+
+_TRAILING_ZH_CONTINUE_INTENT_RE = re.compile(
+    r"(?:^|[。，！？；,!?;\n]|[-—]{2,})\s*(?:\*\*|__)?"
+    r"[^。，！？；,!?：:;\n]{0,24}?"
+    r"(?:"
+    r"我(?:这就|现在就|马上(?:就)?|立即(?:就)?|先)(?:去|来|把|给)?"
+    r"|(?:接下来|下一步)(?:[，,:：]\s*)?我(?:会|要|来|就|将|准备)?(?:去|来|把|给)?"
+    r")"
+    r"(?!(?:不|无法|不能|没法|暂不))"
+    r"[^。，！？；,!?：:;\n]{0,80}"
+    + _TRAILING_ZH_ACTION_RE_FRAGMENT +
+    r"(?![了过完])"
+    r"[^。！？!?：:\n]{0,48}(?:[。.!！…]+|[，,；;]\s*|$)"
+    r"(?=[\s\S]{0,160}\Z)"
+)
+
+# ``我先`` is ambiguous in Chinese: it can introduce a next step (``我先查日志``)
+# or retrospectively report a completed step (``我先查日志了``).  Suppress only
+# the latter, and only inside the same clause, so a later explicit
+# ``接下来我会…`` remains independently detectable by the main expression.
+_TRAILING_ZH_COMPLETED_FIRST_ACTION_RE = re.compile(
+    r"我先(?:去|来|把|给)?[^。，！？；,!?：:;\n]{0,32}?"
+    r"(?:发送|转发|通知|转告|联系|询问|回复|提醒|跟进|调用|运行|执行"
+    r"|启动|重启|停止|创建|新建|建立|修改|更新|部署|提交|上传|下载"
+    r"|安装|配置|修复|接入|删除|清理|同步|写入|保存|移动|复制|打开|关闭"
+    r"|检查|查看|查询|查证|检索|搜索|读取|核对|确认|验证|测试|排查|调查"
+    r"|分析|整理|处理|问|写|看|查|发)"
+    r"[^。，！？；,!?：:;\n]{0,32}?(?:了|过|完(?:成)?|好了|完毕)"
+)
+
 # Content longer than this is a substantive reply, not a dangling ack.
 _TRAILING_CONTINUE_INTENT_MAX_CHARS = 400
 
 
 def trailing_continue_intent(text: str) -> bool:
-    """Whether ``text`` is a short reply ENDING on an announced next action (stall-guard re-prompt trigger)."""
-    t = (text or "").strip()
-    if not t or len(t) > _TRAILING_CONTINUE_INTENT_MAX_CHARS:
-        return False
-    return bool(_TRAILING_CONTINUE_INTENT_RE.search(t[-160:]))
+    """Compatibility wrapper for the high-precision structured inspector."""
+    from agent.promise_continue_guard import trailing_continue_intent as inspect_bool
+    return inspect_bool(text)
 
 
 _INTENT_ACK_ON = {"true", "always", "yes", "on"}

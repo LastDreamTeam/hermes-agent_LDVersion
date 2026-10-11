@@ -12,6 +12,7 @@ import fnmatch
 import os
 from pathlib import Path
 
+from agent.i18n import t
 from tools.binary_extensions import has_opaque_document_extension, is_pdf_path
 from tools.file_tools_paths import _expand_tilde, _resolve_path_for_task
 
@@ -183,11 +184,8 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
     scope, fail-closed without a human channel.
     """
     targets = ", ".join(dict.fromkeys(reasons))
-    description = (
-        f"Write to protected agent-instruction file(s): {targets}. "
-        "These files steer future agent behavior; approval is always "
-        "required (not bypassed by auto-approve).")
-    display = f"<write to {targets}>"
+    description = t("protected_instruction.description", targets=targets)
+    display = t("protected_instruction.display", targets=targets)
     blocked = (
         f"BLOCKED: write to protected agent-instruction file(s) ({targets}) "
         "{why} The user has NOT consented to this write. Do NOT retry it or "

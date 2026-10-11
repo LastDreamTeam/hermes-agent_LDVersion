@@ -609,8 +609,7 @@ def _blocked_tool_result(agent, ref: _ToolCallRef, *, block_message: Optional[st
 
 
 def _pre_tool_block(agent, ref: _ToolCallRef):
-    """Run ``pre_tool_call`` plugin hooks; returns ``(block_message, final_args)`` with any
-    hook-modified args applied. Hook failures never block."""
+    """Run ``pre_tool_call`` hooks and fail closed for protected owner actions."""
     try:
         from hermes_cli.plugins import _dispatch_pre_tool_call_hooks
 
@@ -622,7 +621,17 @@ def _pre_tool_block(agent, ref: _ToolCallRef):
         )
         return block_msg, (ref.args if modified_args is None else modified_args)
     except Exception:
-        return None, ref.args
+        try:
+            from tools.approval import is_owner_high_impact_tool_name
+            if not is_owner_high_impact_tool_name(ref.name):
+                return None, ref.args
+        except Exception:
+            pass
+        return (
+            "BLOCKED: owner high-impact approval policy could not be evaluated; "
+            "do not retry or bypass it.",
+            ref.args,
+        )
 
 
 def _dispatch_authorized_once(

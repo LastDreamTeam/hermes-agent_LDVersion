@@ -16,6 +16,12 @@ These assert behavior contracts, not message snapshots.
 """
 
 from agent.agent_runtime_helpers import trailing_continue_intent
+from agent.promise_continue_guard import (
+    PAST_TENSE,
+    READY,
+    WAIT_AUTH,
+    inspect_continue_candidate,
+)
 from agent.tool_guardrails import (
     IDENTICAL_RESULT_STUB_MIN_CHARS,
     STALL_GUARD_IDENTICAL_CALL_THRESHOLD,
@@ -358,6 +364,56 @@ def test_detects_trailing_next_i():
     assert trailing_continue_intent("Step one complete. Next: I run the tests")
 
 
+def test_detects_trailing_chinese_immediate_action():
+    assert trailing_continue_intent("四个队友的阅读指引也写好了，就等我发通知了 —— 我这就发。")
+    assert trailing_continue_intent("资料已经准备好，我马上把它发给队友。")
+    assert trailing_continue_intent("第一步完成。下一步，我会检查日志。")
+    assert trailing_continue_intent("好的！接下来我来创建任务。")
+    assert trailing_continue_intent("我先查下QQ机器人到底支不支持退群消息，能的话我进群帮你每天记。")
+    assert trailing_continue_intent("顺便：港机那边刚报了个警，我先看一眼，别耽误你游戏的事。")
+
+
+def test_detects_chinese_action_near_tail_of_long_reply():
+    long_reply = ("这是已经完成的背景分析。" * 40)
+    long_reply += "\n\n协作闭环我马上写进团队手册，让全队都按这个模型走。你先喝点水，我会盯着后续。"
+    assert len(long_reply) > 400
+    assert trailing_continue_intent(long_reply)
+
+
+def test_ignores_non_immediate_or_completed_chinese_actions():
+    assert not trailing_continue_intent("我已经把通知发出去了。")
+    assert not trailing_continue_intent("如果你需要，我可以稍后发给你。")
+    assert not trailing_continue_intent("你现在就可以发通知了。")
+    assert not trailing_continue_intent("我这就不发了。")
+    assert not trailing_continue_intent("我先检查了日志，结果一切正常。")
+    assert not trailing_continue_intent("我现在就发给你完整说明：结论是配置没问题。")
+
+
+def test_ignores_hostess_completed_first_action_wording():
+    # Natural retrospective wording used by the primary DeepSeek hostess.
+    assert not trailing_continue_intent("我先查了，没问题")
+    assert not trailing_continue_intent("我先看了一下，没发现问题")
+    assert not trailing_continue_intent("我先检查了日志，一切正常，没有问题")
+    assert not trailing_continue_intent("我先检查日志了，结果仍然没有异常")
+    assert not trailing_continue_intent("我先把报告写完了，已经发给你")
+
+
+def test_ignores_single_character_action_substrings_in_ordinary_words():
+    assert not trailing_continue_intent("我先说明一下这个问题。")
+    assert not trailing_continue_intent("我先讲讲目前的发现。")
+
+
+def test_completed_first_action_does_not_hide_explicit_later_promise():
+    assert trailing_continue_intent("我先查了旧日志，接下来我会修复配置。")
+    assert trailing_continue_intent("我先看完现状，然后补充说明。我马上更新记录。")
+
+
+def test_ignores_chinese_action_earlier_in_long_reply_or_in_fenced_example():
+    earlier_plan = "我马上检查日志。" + ("后续是已完成的详细结果。" * 40)
+    assert not trailing_continue_intent(earlier_plan)
+    assert not trailing_continue_intent("错误示例：\n```text\n我这就发。\n```")
+
+
 def test_ignores_intent_followed_by_more_content():
     # Intent phrase mid-message with substantive content after it — the model
     # already continued; nothing dangling.
@@ -387,3 +443,34 @@ def test_ignores_conversational_future_offers():
     assert not trailing_continue_intent(
         "If you want, I will happily review the PR once CI is green. Just say so!"
     )
+
+
+def test_waiting_for_owner_decision_has_priority_over_immediate_wording():
+    cases = (
+        "按铁律我先问你要不要我处理。你说一声就行。",
+        "要不要我先让 Codex 远程看看能不能诊断出原因？",
+        "你点头，我这就发。",
+        "我马上配置，等你授权后再动手。",
+        "需要我现在就检查吗？",
+    )
+    assert all(inspect_continue_candidate(text)["status"] == WAIT_AUTH for text in cases)
+
+
+def test_query_object_question_is_not_mistaken_for_permission_question():
+    decision = inspect_continue_candidate("我先查下 QQ 机器人到底支不支持？")
+    assert decision["status"] == READY
+    assert decision["action"] == "查"
+
+
+def test_completed_action_and_inline_answer_are_not_reprompted():
+    cases = (
+        "我先检查日志了，结果仍然没有异常。",
+        "我现在就发给你完整说明：结论是配置没问题。",
+    )
+    assert all(inspect_continue_candidate(text)["status"] == PAST_TENSE for text in cases)
+
+
+def test_authorization_for_later_restart_does_not_cancel_current_inspection():
+    decision = inspect_continue_candidate("我先检查日志，如果需要重启，再请你授权。")
+    assert decision["status"] == READY
+    assert decision["action"] == "检查"

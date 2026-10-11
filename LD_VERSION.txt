@@ -1,0 +1,58 @@
+Hermes LD Version - main_1
+
+Purpose
+This branch versions the core source actually used by the Shanghai production
+Gateway, including its LD patches. It is NOT a copy of a bot instance, a backup
+of a server home, or an upgrade to the newest official Hermes release.
+
+Provenance
+- Historical upstream base: f1ccf436a27522c1bb5d36383a6f13b950676338 (2026-09-04).
+- The previous official main is retained as legacy/main_20261011 at
+  97a9ae8ee55d31bebce49f1fb6b5ef775323976a. The original main is not deleted.
+- main_1 is a separate LD development line based on the historical source base.
+- The import contains 70 modified upstream source/localization/test files and
+  10 additional LD source/plugin/test files. Twelve PowerShell files differed
+  only by LF/CRLF on the host and retain their upstream Git content.
+- Five source/test files replace a private confirmation phrase and internal
+  display labels with generic public equivalents; see LD_SOURCE_POLICY.json.
+  The public confirmation phrase is CONFIRM_DELETE, not a secret or identity.
+  Authentication, per-request binding, expiry and replay checks are retained.
+  Every other imported source file matches the host export. Host markers,
+  old backups and caches are excluded. The live host files are NOT changed.
+  Repository-only policy/check files are separate additions.
+
+Public-source boundary
+Do not commit instance configs, .env files, OAuth state, credentials, private
+keys, user identifiers, memories, personal Markdown, bot profiles, session
+databases, conversations, logs, operator scripts, private skills or archives,
+even when the archive is encrypted. The public upstream SOUL.md and AGENTS.md
+are unchanged product/developer templates, not a bot's personal versions.
+
+Before every commit/push:
+  python3 scripts/ci/check_ld_public_source.py --ref :index
+  python3 scripts/ci/check_ld_public_source.py --ref HEAD
+Use an explicit file allowlist when staging. Do not use git add -A on a server
+home or production installation. This checker is a conservative admission
+gate, not proof that arbitrary future code cannot contain private information;
+manual review and secret scanning remain required.
+
+Shanghai integration / safe use on other machines
+The live release remains immutable and continues running from its existing
+path. A separate shallow main_1 Git workspace is used for development and
+comparison. A private, host-local baseline maps the release's file hashes to
+this source revision. No .git directory is inserted into the live release;
+the original ordinary checkout and its remote are not changed either.
+
+Future machines can clone this repository with --branch main_1. They must
+provision their OWN configuration, credentials, persona, memories and data
+outside the source tree. This branch does not transport or recreate those.
+It also does not automatically recreate a host's root-owned launchers,
+systemd units, credential brokers, private MCP endpoints or sealed manifests.
+Those require separately reviewed deployment configuration.
+
+Do not run hermes update or a production git pull to switch a machine to this
+branch. Validate an isolated candidate and dependencies, retain a rollback,
+then request a scoped maintenance window if deployment needs interruption.
+This import does not fix, update or remove existing Shanghai core behavior.
+It is a version-control baseline, not a claim that the full upstream test suite
+has passed or that all machines are already using identical builds.

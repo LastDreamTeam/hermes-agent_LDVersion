@@ -1527,8 +1527,12 @@ class MessageEvent:
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
     # May this event resolve gateway commands / control prompts? Proactive plugin events set False
-    # so untrusted payload text stays conversational. Kept last for positional compat.
+    # so untrusted payload text stays conversational. Kept in its original positional slot.
     allow_gateway_control: bool = True
+    # Exact text authored in this platform event before quote/OCR/STT/attachment enrichment.
+    # ``None`` means the adapter did not establish a trusted author-text boundary. Kept at the
+    # end so every older positional MessageEvent constructor retains its meaning.
+    raw_author_text: Optional[str] = None
 
     def is_command(self) -> bool:
         """Check if this is a command message (e.g., /new, /reset)."""
@@ -1568,6 +1572,18 @@ class TextDebounceState:
 def _append_text(existing: Optional[str], new: Optional[str]) -> str:
     """``existing\\nnew`` when both non-empty; the non-empty one otherwise."""
     return f"{existing}\n{new}" if existing else new
+
+
+def _merge_raw_author_text(existing: MessageEvent, incoming: MessageEvent) -> None:
+    """Merge author text only when every absorbed event established that boundary.
+
+    Falling back to either event's enriched ``text`` would let quoted, transcribed or generated
+    context become user-authored authorization material. One untrusted constituent therefore
+    makes the combined event untrusted as a whole.
+    """
+    old = getattr(existing, "raw_author_text", None)
+    new = getattr(incoming, "raw_author_text", None)
+    existing.raw_author_text = _append_text(old, new) if old is not None and new is not None else None
 
 
 @dataclass
@@ -1728,6 +1744,7 @@ def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], sessi
                 existing.media_text_inlined.extend(incoming_inline_flags)
             if event.text:
                 existing.text = BasePlatformAdapter._merge_caption(existing.text, event.text)
+            _merge_raw_author_text(existing, event)
             if existing_is_photo or incoming_is_photo:
                 existing.message_type = MessageType.PHOTO
             elif existing_type == MessageType.TEXT and event.message_type != MessageType.TEXT:
@@ -1742,6 +1759,7 @@ def merge_pending_message_event(pending_messages: Dict[str, MessageEvent], sessi
         if merge_text and both_text:
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
+            _merge_raw_author_text(existing, event)
             return
     pending_messages[session_key] = event
 
@@ -2335,6 +2353,7 @@ class BasePlatformAdapter(ABC):
         else:
             if event.text:
                 existing.text = _append_text(existing.text, event.text)
+            _merge_raw_author_text(existing, event)
             if event.media_urls:
                 existing.media_urls.extend(event.media_urls)
                 existing.media_types.extend(event.media_types)
@@ -3296,6 +3315,7 @@ class BasePlatformAdapter(ABC):
         else:
             if event.text:
                 state.event.text = _append_text(state.event.text, event.text)
+            _merge_raw_author_text(state.event, event)
             latest_message_id = getattr(event, "message_id", None)
             latest_anchor = latest_message_id or getattr(event, "reply_to_message_id", None)
             if latest_message_id is not None:

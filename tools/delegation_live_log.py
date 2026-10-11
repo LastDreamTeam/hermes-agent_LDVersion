@@ -36,6 +36,17 @@ _KICKOFF_MAX = 500
 _STREAM_BUFFER_FLUSH_CHARS = 4000
 _TIME_FMT = "%Y-%m-%d %H:%M:%S"
 
+# A child can finish long before the rest of its batch.  The old implementation
+# only updated manifest.json after every child had joined, so a parent process
+# that exited during aggregation left already-completed children labelled
+# ``running`` forever.  Serialize the small read/modify/write cycle and publish
+# each terminal child state as soon as its completion callback arrives.
+_MANIFEST_LOCK = threading.Lock()
+_TERMINAL_TASK_STATUSES = {
+    "completed", "error", "failed", "interrupted", "stalled", "timeout",
+    "timed_out", "cancelled", "canceled", "unknown",
+}
+
 
 def live_transcript_root() -> Path:
     """Root directory for live transcripts (profile-safe, never ~/.hermes)."""
@@ -77,7 +88,18 @@ def _joined(*parts: str) -> str:
 
 
 def _dump_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Same-directory replace is atomic on the supported filesystems.  A status
+    # reader therefore sees either the previous complete document or the next
+    # complete document, never half-written JSON.
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class LiveTranscriptWriter:
@@ -167,10 +189,15 @@ class LiveTranscriptWriter:
     def _on_complete(self, tool_name, preview, args, kwargs):
         dur = kwargs.get("duration_seconds")
         summary = kwargs.get("summary") or preview
+        status = str(kwargs.get("status") or "unknown")
         self.marker(_joined(
-            f"status={kwargs.get('status', '?')}",
+            f"status={status}",
             f"duration={dur}s" if dur is not None else "",
             f"summary: {_one_line(summary, _RESULT_MAX)}" if summary else ""))
+        update_manifest_task_status(
+            self.delegation_id, self.task_index, status,
+            source="subagent.complete",
+        )
 
     # Event demux (the tool_progress_callback surface): handler(self, tool_name, preview, args, kwargs).
     _OBSERVERS = {
@@ -197,11 +224,17 @@ class LiveTranscriptWriter:
     def finalize(self, entry: Dict[str, Any]) -> None:
         """Terminal marker with exit-reason detail subagent.complete lacks."""
         exit_reason = entry.get("exit_reason")
+        status = str(entry.get("status") or "unknown")
         self.marker(_joined(
-            f"end status={entry.get('status', '?')}",
+            f"end status={status}",
             f"exit_reason={exit_reason}" if exit_reason else "",
             "(iteration budget exhausted)" if exit_reason == "max_iterations" else "",
             f"error: {_one_line(entry['error'], _RESULT_MAX)}" if entry.get("error") else ""))
+        update_manifest_task_status(
+            self.delegation_id, self.task_index, status,
+            exit_reason=str(exit_reason) if exit_reason else None,
+            source="batch.finalize",
+        )
 
 
 def wrap_progress_callback(inner_cb, writer: LiveTranscriptWriter):
@@ -256,8 +289,9 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                     paths: List[str], model: Optional[str] = None,
                     provider: Optional[str] = None) -> None:
     with _best_effort("manifest write"):
+        now = time.strftime(_TIME_FMT)
         _dump_json(_manifest_path(delegation_id), {
-            "delegation_id": delegation_id, "started": time.strftime(_TIME_FMT),
+            "delegation_id": delegation_id, "started": now, "updated_at": now,
             "task_count": len(task_list), "model": model, "provider": provider,
             "tasks": [{
                 "index": i,
@@ -267,22 +301,64 @@ def _write_manifest(delegation_id: str, task_list: List[Dict[str, Any]],
                 "status": "running"} for i, t in enumerate(task_list)]})
 
 
+def update_manifest_task_status(
+    delegation_id: Optional[str], task_index: int, status: str, *,
+    exit_reason: Optional[str] = None, source: str = "live",
+) -> None:
+    """Publish one child's terminal state immediately.
+
+    This is deliberately best-effort and metadata-only: it does not read model
+    reasoning, touch the durable delivery ledger, wake a session, or replay a
+    result.  The later batch aggregate remains authoritative and idempotently
+    writes the same task states again.
+    """
+    if not delegation_id or not isinstance(task_index, int):
+        return
+    normalized = str(status or "unknown")
+    with _best_effort("manifest task update"), _MANIFEST_LOCK:
+        mp = _manifest_path(delegation_id)
+        manifest = json.loads(mp.read_text(encoding="utf-8"))
+        now = time.strftime(_TIME_FMT)
+        matched = False
+        for task in manifest.get("tasks", []):
+            if task.get("index") != task_index:
+                continue
+            task["status"] = normalized
+            task["status_updated_at"] = now
+            task["status_source"] = source
+            if exit_reason:
+                task["exit_reason"] = exit_reason
+            matched = True
+            break
+        if not matched:
+            return
+        manifest["updated_at"] = now
+        tasks = manifest.get("tasks", [])
+        if tasks and all(str(t.get("status") or "") in _TERMINAL_TASK_STATUSES for t in tasks):
+            manifest["completed"] = now
+        _dump_json(mp, manifest)
+
+
 def update_manifest_statuses(delegation_id: Optional[str],
                              results: List[Dict[str, Any]]) -> None:
     """Best-effort per-task status update once the batch has aggregated."""
     if not delegation_id:
         return
-    with _best_effort("manifest update"):
+    with _best_effort("manifest update"), _MANIFEST_LOCK:
         mp = _manifest_path(delegation_id)
         manifest = json.loads(mp.read_text(encoding="utf-8"))
         by_index = {r.get("task_index"): r for r in results if isinstance(r, dict)}
+        now = time.strftime(_TIME_FMT)
         for task in manifest.get("tasks", []):
             r = by_index.get(task.get("index"))
             if r is not None:
                 task["status"] = r.get("status", task.get("status"))
+                task["status_updated_at"] = now
+                task["status_source"] = "batch.aggregate"
                 if r.get("exit_reason"):
                     task["exit_reason"] = r["exit_reason"]
-        manifest["completed"] = time.strftime(_TIME_FMT)
+        manifest["updated_at"] = now
+        manifest["completed"] = now
         _dump_json(mp, manifest)
 
 

@@ -440,6 +440,12 @@ _CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
 # mutation, prompt cache intact.
 _server_trust_levels: Dict[str, str] = {}
 _tool_read_only_hints: Dict[str, Dict[str, bool]] = {}
+# MCP ``ToolAnnotations.idempotentHint`` is advisory but is the only protocol-level
+# signal that an automatic recovery replay is safe.  Keep it tri-state: explicit
+# ``False`` means never replay after an ambiguous auth/session/transport failure;
+# explicit ``True`` and missing/invalid metadata preserve the historical one-retry
+# behaviour for compatibility.
+_tool_idempotent_hints: Dict[str, Dict[str, Optional[bool]]] = {}
 
 _TRUST_FULL, _TRUST_UNTRUSTED = "full", "untrusted"
 

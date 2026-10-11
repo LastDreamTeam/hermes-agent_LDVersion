@@ -15,6 +15,11 @@ _STATUS_ICONS = {
     "blocked": "⊘", "done": "✓", "archived": "—",
 }
 
+_ZH_STATUS_LABELS = {
+    "todo": "待办", "ready": "就绪", "running": "运行中", "scheduled": "已排期",
+    "blocked": "受阻", "done": "已完成", "archived": "已归档",
+}
+
 _TASK_DICT_FIELDS = (
     "id", "title", "body", "assignee", "status", "priority", "tenant",
     "workspace_kind", "workspace_path", "branch_name", "project_id",
@@ -72,10 +77,13 @@ def _bulk_apply(ids: Iterable[str], op: Callable[[str], Any],
 
 
 def _fmt_task_line(t: kb.Task) -> str:
+    from agent.i18n import get_language
     icon = _STATUS_ICONS.get(t.status, "?")
-    assignee = t.assignee or "(unassigned)"
+    chinese = get_language() == "zh"
+    status = _ZH_STATUS_LABELS.get(t.status, t.status) if chinese else t.status
+    assignee = t.assignee or ("（未分配）" if chinese else "(unassigned)")
     tenant = f" [{t.tenant}]" if t.tenant else ""
-    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}"
+    return f"{icon} {t.id}  {status:8s}  {assignee:20s}{tenant}  {t.title}"
 
 
 def _obj_dict(obj: Any, fields: tuple[str, ...]) -> dict[str, Any]:

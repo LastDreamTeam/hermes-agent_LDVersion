@@ -47,13 +47,35 @@ def _annotation_read_only_hint(mcp_tool: Any) -> bool:
     return hint is True
 
 
+def _annotation_idempotent_hint(mcp_tool: Any) -> Optional[bool]:
+    """Return the exact tri-state ``idempotentHint`` annotation.
+
+    MCP SDK 1.x exposes camelCase attributes, 2.x exposes snake_case
+    attributes, and schema-cache rows arrive as dictionaries.  Only a real
+    boolean is trusted; missing or malformed values remain ``None`` so the
+    pre-existing retry policy stays backward compatible.
+    """
+    annotations = getattr(mcp_tool, "annotations", None)
+    if isinstance(annotations, dict):
+        hint = annotations.get("idempotentHint", annotations.get("idempotent_hint"))
+    else:
+        hint = mcp_field(annotations, "idempotent_hint", "idempotentHint")
+    return hint if isinstance(hint, bool) else None
+
+
 def _record_tool_trust_metadata(server_name: str, config: dict, tools: List[Any]) -> None:
-    """Capture per-server trust and per-tool readOnlyHint at discovery — the security boundary: the call-time gate
-    classifies from data we control, never re-read server-supplied state."""
+    """Capture per-server trust plus call-policy annotations at discovery.
+
+    The call-time trust and replay gates classify from this snapshot rather
+    than re-reading mutable server objects.
+    """
     with _core._lock:
         _core._server_trust_levels[server_name] = _normalize_server_trust((config or {}).get("trust"))
         hints = _core._tool_read_only_hints.setdefault(server_name, {})
         hints.update({t.name: _annotation_read_only_hint(t) for t in tools if getattr(t, "name", None)})
+        idempotent_hints = _core._tool_idempotent_hints.setdefault(server_name, {})
+        idempotent_hints.update({
+            t.name: _annotation_idempotent_hint(t) for t in tools if getattr(t, "name", None)})
 
 
 def _track_mcp_tool_server(tool_name: str, server_name: str) -> None:
@@ -272,10 +294,16 @@ def _write_schema_cache(name: str, server: "MCPServerTask", config: dict, should
             # ``inputSchema`` into the schema cache on every write-through, so a ``lazy: true`` server
             # registered from cache with every parameter stripped. ``mcp_field`` reads both spellings.
             schema_obj = mcp_field(t, "input_schema", "inputSchema")
+            idempotent_hint = _annotation_idempotent_hint(t)
+            annotations = {"readOnlyHint": _annotation_read_only_hint(t)}
+            if idempotent_hint is not None:
+                annotations["idempotentHint"] = idempotent_hint
             tools_payload.append({
                 "name": t.name, "description": t.description or "",
                 "inputSchema": schema_obj if isinstance(schema_obj, dict) else {},
-                "annotations": {"readOnlyHint": _annotation_read_only_hint(t)},  # lazy path trust-gates identically
+                # Preserve the explicit idempotency tri-state through lazy
+                # startup; omission must stay omission, not turn into False.
+                "annotations": annotations,
             })
         utility_payload = [{"schema": e["schema"], "handler_key": e["handler_key"]}
                            for e in _select_utility_schemas(name, server, config)]

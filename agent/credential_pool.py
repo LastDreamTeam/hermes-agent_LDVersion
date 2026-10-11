@@ -2205,7 +2205,18 @@ class CredentialPool:
                 write_credential_pool(self.provider, [e.to_dict() for e in self._entries])
                 self._borrowed_root_ids = set()
             else:
-                self._persist()
+                # Adding a single-use OAuth credential is an explicit claim of
+                # ownership by the active auth store.  ``self._persist()`` is
+                # intentionally update-only for a named profile that normally
+                # borrows this provider from the global root; when neither the
+                # profile nor root has a row yet, that path drops the brand-new
+                # credential.  Write directly here so the first credential for
+                # an otherwise-empty named profile is actually created locally.
+                if self.provider in SINGLE_USE_REFRESH_POOL_PROVIDERS:
+                    write_credential_pool(
+                        self.provider, [e.to_dict() for e in self._entries])
+                else:
+                    self._persist()
             return entry
 
 

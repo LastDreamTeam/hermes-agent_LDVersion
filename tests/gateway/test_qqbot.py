@@ -273,6 +273,74 @@ class TestGroupAllowed:
         assert adapter._is_group_allowed("grp1", "user1") is False
 
 
+class TestGroupMemberTemporaryAccess:
+    def _make_adapter(self, tmp_path, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+        monkeypatch.setattr(
+            QQAdapter, "_member_access_state_path",
+            staticmethod(lambda: tmp_path / "qqbot_group_member_access.json"),
+        )
+        return QQAdapter(_make_config(
+            app_id="a", client_secret="b", group_policy="open",
+            group_member_policy="owner_admin_temporary", group_owners=["owner"],
+            temporary_access_minutes=30,
+        ))
+
+    def test_owner_is_allowed_and_guest_requires_unexpired_grant(self, tmp_path, monkeypatch):
+        adapter = self._make_adapter(tmp_path, monkeypatch)
+        assert adapter._is_group_member_allowed("group", "owner") is True
+        assert adapter._is_group_member_allowed("group", "guest") is False
+        adapter._temporary_group_access["group"] = {"guest": 32503680000.0}
+        assert adapter._is_group_member_allowed("group", "guest") is True
+        adapter._temporary_group_access["group"]["guest"] = 1.0
+        assert adapter._is_group_member_allowed("group", "guest") is False
+
+    @pytest.mark.asyncio
+    async def test_owner_can_grant_known_mentioned_member_for_30_minutes(self, tmp_path, monkeypatch):
+        adapter = self._make_adapter(tmp_path, monkeypatch)
+        adapter._remember_group_member("group", "guest-openid", {"username": "Alice"}, {})
+        adapter._send_group_acl_reply = mock.AsyncMock()
+
+        before = __import__("time").time()
+        handled = await adapter._handle_group_member_command(
+            "group", "owner", "/允许回复 @Alice", {}, "message-1")
+
+        assert handled is True
+        expiry = adapter._temporary_group_access["group"]["guest-openid"]
+        assert before + 1795 <= expiry <= before + 1805
+        adapter._send_group_acl_reply.assert_awaited_once()
+
+    def test_per_principal_toolsets_partition_owner_capabilities(self, tmp_path, monkeypatch):
+        from gateway.platforms.qqbot import QQAdapter
+        monkeypatch.setattr(
+            QQAdapter, "_member_access_state_path",
+            staticmethod(lambda: tmp_path / "qqbot_group_member_access.json"),
+        )
+        adapter = QQAdapter(_make_config(
+            app_id="a", client_secret="b", group_policy="open",
+            group_member_policy="owner_admin_temporary",
+            group_owners=["super", "co-owner"], group_super_owners=["super"],
+            public_toolsets=["web", "tts"],
+            owner_toolsets=["web", "tts", "a2a"],
+            super_owner_toolsets=["hermes-qqbot", "a2a"],
+        ))
+
+        assert adapter.toolsets_for_source(SimpleNamespace(user_id="super")) == ["hermes-qqbot", "a2a"]
+        assert adapter.toolsets_for_source(SimpleNamespace(user_id="co-owner")) == ["web", "tts", "a2a"]
+        assert adapter.toolsets_for_source(SimpleNamespace(user_id="guest")) == ["web", "tts"]
+        assert adapter._is_group_super_owner("co-owner") is False
+
+    def test_recent_member_alias_expires_after_five_minutes(self, tmp_path, monkeypatch):
+        adapter = self._make_adapter(tmp_path, monkeypatch)
+        now = __import__("time").time()
+        adapter._recent_blocked_members["group"] = [
+            (now - 301, "old", "Old"),
+            (now - 299, "recent", "Recent"),
+        ]
+
+        assert adapter._resolve_group_command_target("group", "owner", "上一个", {}) == ("recent", "Recent")
+
+
 # ---------------------------------------------------------------------------
 # _resolve_stt_config
 # ---------------------------------------------------------------------------
@@ -1270,4 +1338,3 @@ class TestReadEventsClosedWsGuard:
         adapter._ws = SimpleNamespace(closed=True)
         with pytest.raises(RuntimeError):
             asyncio.run(adapter._read_events())
-

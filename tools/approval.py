@@ -14,9 +14,13 @@ call time; sibling-defined names are imported from their defining module.
 from dataclasses import dataclass
 import hashlib
 import importlib
+import json
 import logging
 import os
+from pathlib import Path
+import stat
 import threading
+import time
 from typing import Optional
 
 from utils import env_var_enabled, is_truthy_value
@@ -116,6 +120,191 @@ def _denial_breaker_addendum(session_key: str) -> str:
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
 
+# Owner-only, externally consequential actions (paid orders and account writes) use a
+# deliberately separate approval contract.  They are never eligible for the ordinary
+# /approve, button, session/permanent, YOLO, cron, or unattended approval paths.  The
+# trusted gateway event router may resolve exactly one such request only when the raw
+# message is byte-for-byte the phrase below in the same authenticated session.
+OWNER_HIGH_IMPACT_RULE_PREFIX = "owner-high-impact:"
+OWNER_HIGH_IMPACT_APPROVAL_KIND = "owner_exact_phrase_once"
+OWNER_HIGH_IMPACT_PHRASE = "CONFIRM_DELETE"
+OWNER_HIGH_IMPACT_CHOICE = "owner_phrase_once"
+OWNER_HIGH_IMPACT_TIMEOUT_S = 300.0
+_OWNER_HIGH_IMPACT_PRINCIPALS_FILE = Path(
+    os.getenv(
+        "HERMES_OWNER_HIGH_IMPACT_PRINCIPALS_FILE",
+        "/etc/hermes-owner-broker/owner-principals.json",
+    )
+)
+OWNER_HIGH_IMPACT_TOOL_NAMES = frozenset({
+    "didi_create_order", "didi_cancel_order", "taxi_create_order", "taxi_cancel_order",
+    "netease_auth_maintenance", "netease_song_like_write", "netease_playlist_write",
+    "netease_podcast_write", "netease_note_write", "netease_comment_write",
+    "netease_cloud_write", "netease_ai_song_write", "netease_playback_device",
+    # Legacy direct NetEase mutation names are intentionally not model-visible in
+    # the owner plugin.  Keep them in the core classifier nevertheless: if plugin
+    # hook dispatch itself fails while a stale/direct MCP registration still
+    # exists, every mutation must fail closed instead of falling through.
+    "netease_song_like", "netease_song_dislike",
+    "netease_playlist_create", "netease_playlist_add", "netease_playlist_remove",
+    "netease_playlist_reorder", "netease_playlist_update_name",
+    "netease_playlist_update_desc", "netease_playlist_update_tags",
+    "netease_playlist_update_cover",
+    "netease_podcast_subscribe", "netease_podcast_unsubscribe",
+    "netease_podcast_voicelist_create", "netease_podcast_voicelist_edit",
+    "netease_podcast_voice_upload", "netease_podcast_voice_update",
+    "netease_note_publish", "netease_note_delete",
+    "netease_comment_post", "netease_comment_reply",
+    "netease_cloud_download_file", "netease_cloud_update_sort",
+    "netease_cloudupload_upload", "netease_cloudupload_upload_file",
+    "netease_cloudupload_stop", "netease_aisong_daily_login",
+    "netease_aisong_generate", "netease_aisong_generate_lyric",
+    "netease_play", "netease_pause", "netease_resume", "netease_stop",
+    "netease_next", "netease_prev", "netease_seek", "netease_volume",
+    "netease_queue_add", "netease_queue_clear",
+})
+
+
+def is_owner_high_impact_tool_name(tool_name: str) -> bool:
+    return str(tool_name or "").rsplit("__", 1)[-1] in OWNER_HIGH_IMPACT_TOOL_NAMES
+
+
+def _is_owner_high_impact_entry(entry) -> bool:
+    return (
+        getattr(entry, "policy", "") == OWNER_HIGH_IMPACT_APPROVAL_KIND
+        or entry.data.get("approval_kind") == OWNER_HIGH_IMPACT_APPROVAL_KIND
+    )
+
+
+def _owner_high_impact_principal_from_values(
+    *, platform="", chat_id="", chat_type="", thread_id="", user_id="",
+    user_id_alt="", scope_id="", profile="",
+) -> tuple[str, ...]:
+    """Canonical immutable origin identity for one exact-phrase approval."""
+    values = tuple(str(value or "") for value in (
+        platform, chat_id, chat_type, thread_id, user_id, user_id_alt, scope_id, profile,
+    ))
+    # A human identity is mandatory.  Chat/thread can be absent on some DM
+    # adapters, but a platform plus stable user identity may not be.
+    if not values[0] or not values[1] or not (values[4] or values[5]):
+        return ()
+    return values
+
+
+def _match_owner_high_impact_principal(principal) -> tuple[str, str] | None:
+    """Return the allowlisted ``(platform, stable_user_id)`` or ``None``.
+
+    Pairing proves that a person may chat with a bot; it does not grant authority
+    to spend money or mutate the owner's external accounts.  Those stronger
+    privileges live in a separate root-owned allowlist.  The file is read for
+    every high-impact decision so replacing or corrupting it fails closed
+    immediately instead of leaving a stale in-process grant.
+    """
+    values = tuple(str(value or "") for value in (principal or ()))
+    if len(values) != 8 or not values[0] or not (values[4] or values[5]):
+        return None
+    path = _OWNER_HIGH_IMPACT_PRINCIPALS_FILE
+    try:
+        if not path.is_absolute():
+            return None
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 32_768:
+            return None
+        # On production Linux only root may own this policy and neither group
+        # nor other users may modify it.  Windows keeps the branch reachable
+        # for unit tests without pretending its ACL model is POSIX.
+        if os.name == "posix" and (info.st_uid != 0 or info.st_mode & 0o022):
+            return None
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(document, dict) or document.get("version") != 1:
+        return None
+    entries = document.get("principals")
+    if not isinstance(entries, list):
+        return None
+
+    platform = values[0].strip().lower()
+    user_ids = {value for value in (values[4], values[5]) if value}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("platform") or "").strip().lower() != platform:
+            continue
+        # File order is the administrator's canonical preference.  Selecting a
+        # concrete matched id (instead of hashing all transport fields) keeps
+        # the same owner valid across DMs/devices while never trusting an id
+        # supplied by model-authored tool arguments.
+        allowed_ids = tuple(
+            str(entry.get(key) or "").strip()
+            for key in ("user_id", "user_id_alt")
+            if str(entry.get(key) or "").strip()
+        )
+        matched_id = next((candidate for candidate in allowed_ids if candidate in user_ids), "")
+        if not matched_id:
+            continue
+        required_chat = str(entry.get("chat_id") or "").strip()
+        if required_chat and values[1] != required_chat:
+            continue
+        return platform, matched_id
+    return None
+
+
+def is_owner_high_impact_principal_allowed(principal) -> bool:
+    """Return whether *principal* is one of the root-managed owner identities."""
+    return _match_owner_high_impact_principal(principal) is not None
+
+
+def owner_high_impact_principal_sha256(principal) -> str:
+    """Derive the broker identity for an allowlisted authenticated owner.
+
+    The domain-separated digest is safe to persist in the broker policy and
+    does not disclose the platform account id.  An unlisted or malformed
+    identity returns an empty string and therefore fails closed.
+    """
+    matched = _match_owner_high_impact_principal(principal)
+    if matched is None:
+        return ""
+    platform, stable_user_id = matched
+    material = f"hermes-owner-principal-v1\0{platform}\0{stable_user_id}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _current_owner_high_impact_principal() -> tuple[str, ...]:
+    try:
+        from gateway.session_context import get_session_env
+        return _owner_high_impact_principal_from_values(
+            platform=get_session_env("HERMES_SESSION_PLATFORM", ""),
+            chat_id=get_session_env("HERMES_SESSION_CHAT_ID", ""),
+            chat_type=get_session_env("HERMES_SESSION_CHAT_TYPE", ""),
+            thread_id=get_session_env("HERMES_SESSION_THREAD_ID", ""),
+            user_id=get_session_env("HERMES_SESSION_USER_ID", ""),
+            user_id_alt=get_session_env("HERMES_SESSION_USER_ID_ALT", ""),
+            scope_id=get_session_env("HERMES_SESSION_SCOPE_ID", ""),
+            profile=get_session_env("HERMES_SESSION_PROFILE", ""),
+        )
+    except Exception:
+        return ()
+
+
+def owner_high_impact_principal_from_source(source) -> tuple[str, ...]:
+    """Build the resolver identity from an authenticated inbound source."""
+    try:
+        platform_obj = getattr(source, "platform", "")
+        platform = getattr(platform_obj, "value", platform_obj)
+        return _owner_high_impact_principal_from_values(
+            platform=platform,
+            chat_id=getattr(source, "chat_id", ""),
+            chat_type=getattr(source, "chat_type", ""),
+            thread_id=getattr(source, "thread_id", ""),
+            user_id=getattr(source, "user_id", ""),
+            user_id_alt=getattr(source, "user_id_alt", ""),
+            scope_id=getattr(source, "scope_id", ""),
+            profile=getattr(source, "profile", ""),
+        )
+    except Exception:
+        return ()
+
 
 def register_gateway_notify(session_key: str, cb) -> None:
     """Register ``cb(approval_data: dict) -> None`` for sending approval requests. The callback
@@ -144,19 +333,32 @@ def resolve_gateway_approval(session_key: str, choice: str,
     (FIFO) or the one matching *request_id*. *reason* is the ``/deny <reason>`` free text,
     relayed to the agent in the BLOCKED message. Returns the number resolved.
     """
+    # Generic approval surfaces are intentionally unable to approve an owner
+    # high-impact request.  Explicit denial remains available everywhere so the
+    # owner can safely stop a pending operation with /deny or a deny button.
+    allow_owner_high_impact = choice == "deny"
     with _lock:
         queue = _gateway_queues.get(session_key)
         if not queue:
             return 0
         if request_id:
             targets = [entry for entry in queue if entry.data.get("request_id") == request_id]
+            if not allow_owner_high_impact:
+                targets = [entry for entry in targets if not _is_owner_high_impact_entry(entry)]
             if not targets:
                 return 0
             queue[:] = [entry for entry in queue if entry not in targets]
         elif resolve_all:
-            targets = list(queue)
-            queue.clear()
+            targets = [entry for entry in queue
+                       if allow_owner_high_impact or not _is_owner_high_impact_entry(entry)]
+            if not targets:
+                return 0
+            queue[:] = [entry for entry in queue if entry not in targets]
         else:
+            # FIFO approval must not jump over a high-impact request and
+            # accidentally approve some later ordinary request instead.
+            if not allow_owner_high_impact and _is_owner_high_impact_entry(queue[0]):
+                return 0
             targets = [queue.pop(0)]
         if not queue:
             _gateway_queues.pop(session_key, None)
@@ -167,6 +369,54 @@ def resolve_gateway_approval(session_key: str, choice: str,
             entry.reason = reason
         entry.event.set()
     return len(targets)
+
+
+def resolve_owner_high_impact_approval(
+    session_key: str, raw_text: str, request_id: str, principal,
+) -> int:
+    """Resolve exactly one owner high-impact request with the exact owner phrase.
+
+    This function accepts the raw, unnormalised gateway message.  Whitespace,
+    punctuation, extra text, case-folding, slash commands, buttons, and approval
+    scopes are deliberately not accepted.  The caller must additionally establish
+    that the inbound event is authorised for gateway control.
+    """
+    principal = tuple(principal or ())
+    if (
+        not session_key or not request_id or not principal
+        or not isinstance(raw_text, str) or raw_text != OWNER_HIGH_IMPACT_PHRASE
+        or not is_owner_high_impact_principal_allowed(principal)
+    ):
+        return 0
+    with _lock:
+        queue = _gateway_queues.get(session_key)
+        if not queue:
+            return 0
+        index = next((
+            idx for idx, entry in enumerate(queue)
+            if _is_owner_high_impact_entry(entry)
+            and entry.data.get("request_id") == request_id
+        ), None)
+        if index is None:
+            return 0
+        entry = queue[index]
+        if (
+            tuple(getattr(entry, "origin_principal", ())) != principal
+            or getattr(entry, "expires_at", None) is None
+        ):
+            return 0
+        if time.monotonic() > entry.expires_at:
+            queue.pop(index)
+            if not queue:
+                _gateway_queues.pop(session_key, None)
+            entry.event.set()
+            return 0
+        queue.pop(index)
+        if not queue:
+            _gateway_queues.pop(session_key, None)
+    entry.result = OWNER_HIGH_IMPACT_CHOICE
+    entry.event.set()
+    return 1
 
 
 def list_gateway_approvals(session_key: str) -> list[dict]:
@@ -189,6 +439,26 @@ def has_blocking_approval(session_key: str) -> bool:
     """Check if a session has one or more blocking gateway approvals waiting."""
     with _lock:
         return bool(_gateway_queues.get(session_key))
+
+
+def has_blocking_owner_high_impact_approval(session_key: str) -> bool:
+    """Whether this exact gateway session has an unresolved owner phrase gate."""
+    if not session_key:
+        return False
+    with _lock:
+        return any(_is_owner_high_impact_entry(entry)
+                   for entry in _gateway_queues.get(session_key, []))
+
+
+def get_pending_owner_high_impact_approval(session_key: str) -> dict | None:
+    """Public-data snapshot of the oldest exact-phrase request in this session."""
+    if not session_key:
+        return None
+    with _lock:
+        for entry in _gateway_queues.get(session_key, []):
+            if _is_owner_high_impact_entry(entry):
+                return dict(entry.data)
+    return None
 
 
 def get_pending_gateway_approval(session_key: str) -> dict | None:
@@ -915,6 +1185,14 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
     when empty it is ``tool_name`` + a hash of ``reason`` so DISTINCT reasons on the same tool
     persist independently. Returns the ``check_dangerous_command`` result shape.
     """
+    # Central invariant: callers cannot accidentally route an owner financial
+    # action through the reusable generic approval mechanism.  Keep the same
+    # check here even though the plugin dispatcher also selects the dedicated
+    # function explicitly.
+    if isinstance(rule_key, str) and rule_key.startswith(OWNER_HIGH_IMPACT_RULE_PREFIX):
+        return request_owner_high_impact_approval(
+            tool_name, reason, rule_key=rule_key,
+        )
     description = reason or f"Plugin requires approval for {tool_name}"
     if not rule_key:
         rule_key = f"{tool_name}:{hashlib.sha256(description.encode('utf-8')).hexdigest()[:12]}"
@@ -930,6 +1208,114 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
         no_human_block_message=(f"BLOCKED: {subject} but no interactive user or gateway is present "
                                 "to approve it. A plugin flagged this action for human confirmation."),
     )
+
+
+def request_owner_high_impact_approval(
+    tool_name: str, reason: str, *, rule_key: str,
+) -> dict:
+    """Require one exact owner phrase for a paid order or external account write.
+
+    This gate intentionally bypasses none of its checks: YOLO, ``approvals.mode:
+    off``, cached session/permanent choices, interactive CLI callbacks, cron,
+    single-query, unattended platforms, and selected approval transports cannot
+    authorize it.  Only the authenticated gateway session that initiated the tool
+    call can consume its one-shot request via
+    :func:`resolve_owner_high_impact_approval`.
+    """
+    description = reason or f"Owner confirmation required for {tool_name}"
+    pattern_key = f"plugin_rule:{rule_key}"
+    block_prefix = (
+        "BLOCKED: 该订单、扣费或外部账号写操作需要主人在发起操作的当前会话中，"
+        f"单独发送精确口令“{OWNER_HIGH_IMPACT_PHRASE}”。"
+    )
+    if not isinstance(rule_key, str) or not rule_key.startswith(OWNER_HIGH_IMPACT_RULE_PREFIX):
+        return _blocked(
+            f"{block_prefix} 审批规则标识无效；已拒绝执行。",
+            pattern_key=pattern_key, description=description,
+        )
+
+    session_key = get_current_session_key(default="")
+    attended_gateway = (
+        bool(session_key)
+        and _is_gateway_approval_context()
+        and not _is_cron_approval_context()
+        and not _is_single_query_approval_context()
+        and not _is_unattended_platform_approval_context()
+        and _get_session_platform() != "a2a"
+    )
+    if attended_gateway:
+        try:
+            from gateway.session_context import session_is_messaging_surface
+            attended_gateway = bool(session_is_messaging_surface())
+        except Exception:
+            attended_gateway = False
+    if not attended_gateway:
+        return _blocked(
+            f"{block_prefix} 当前不是可交互的主人网关会话；YOLO、定时任务、A2A/CLI、"
+            "单次查询和无人值守入口均不能代替主人确认。",
+            pattern_key=pattern_key, description=description,
+        )
+    origin_principal = _current_owner_high_impact_principal()
+    if not origin_principal:
+        return _blocked(
+            f"{block_prefix} 当前会话缺少稳定的平台用户身份，无法安全绑定确认人；已拒绝执行。",
+            pattern_key=pattern_key, description=description,
+        )
+    if not is_owner_high_impact_principal_allowed(origin_principal):
+        return _blocked(
+            f"{block_prefix} 当前发信者虽可与机器人聊天，但不在主人付费/账号写入授权名单中；"
+            "已拒绝执行。",
+            pattern_key=pattern_key, description=description,
+        )
+    notify_cb = _gateway_notify_cb(session_key)
+    if notify_cb is None:
+        return _blocked(
+            f"{block_prefix} 当前会话没有可用的审批通知通道；已安全拒绝。",
+            pattern_key=pattern_key, description=description,
+        )
+
+    from agent.redact import redact_sensitive_text
+    data = {
+        "command": f"<{redact_sensitive_text(tool_name)}> (owner high-impact action)",
+        "pattern_key": pattern_key,
+        "pattern_keys": [pattern_key],
+        "description": redact_sensitive_text(description),
+        "allow_permanent": False,
+        "allow_session": False,
+        "approval_kind": OWNER_HIGH_IMPACT_APPROVAL_KIND,
+        "required_phrase": OWNER_HIGH_IMPACT_PHRASE,
+    }
+    decision = _await_gateway_decision(
+        session_key, notify_cb, data, surface="gateway",
+        policy=OWNER_HIGH_IMPACT_APPROVAL_KIND,
+        origin_principal=origin_principal,
+        timeout_s=OWNER_HIGH_IMPACT_TIMEOUT_S,
+    )
+    if decision.get("notify_failed"):
+        return _denied(
+            f"{block_prefix} 确认请求发送失败；不要自动重试。",
+            pattern_key=pattern_key, description=description, outcome="notify_failed",
+        )
+    if not decision.get("resolved"):
+        return _denied(
+            f"{block_prefix} 等待超时；沉默不代表同意，不要自动重试。",
+            pattern_key=pattern_key, description=description, outcome="timeout",
+        )
+    if decision.get("choice") != OWNER_HIGH_IMPACT_CHOICE:
+        deny_reason = decision.get("reason")
+        suffix = f" 原因：{deny_reason}" if deny_reason else ""
+        return _denied(
+            f"{block_prefix} 主人已拒绝或未使用精确口令。{suffix} 不要自动重试。",
+            pattern_key=pattern_key, description=description, outcome="denied",
+            deny_reason=deny_reason,
+        )
+    return {
+        "approved": True,
+        "message": None,
+        "user_approved": True,
+        "description": description,
+        "owner_exact_phrase": True,
+    }
 
 
 # --- Combined pre-exec guard (tirith + dangerous command detection) -------------------------------------------------

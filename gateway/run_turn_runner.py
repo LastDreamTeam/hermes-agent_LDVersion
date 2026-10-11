@@ -1041,10 +1041,25 @@ class TurnRunner:
         pending: list[str] = []
         pending_lock = threading.Lock()
 
+        def display_message(message: str) -> str:
+            """Translate only at the final user-visible boundary; internal review events remain English."""
+            phrase = getattr(ctx, "_user_phrase", None)
+            if not callable(phrase):
+                return message
+            if message == "💾 Memory updated":
+                return phrase("memory.updated")
+            prefix = "💾 Self-improvement review: "
+            if message.startswith(prefix):
+                summary = message[len(prefix):]
+                if summary == "Memory updated":
+                    return phrase("memory.updated")
+                return phrase("memory.review", summary=summary)
+            return message
+
         def deliver(message: str) -> None:
             if self._status_live():
                 self._send_status_text(
-                    message,
+                    display_message(message),
                     _interim_metadata(_non_conversational_metadata(ctx._status_thread_metadata, platform=ctx.source.platform)),
                     "background_review_callback scheduling error",
                 )
@@ -1245,6 +1260,36 @@ class TurnRunner:
         cmd = _redact_approval_command(approval_data.get("command", ""))
         desc = approval_data.get("description", "dangerous command")
         flags = {k: approval_data.get(k, d) for k, d in (("allow_permanent", True), ("allow_session", True), ("smart_denied", False))}
+        if approval_data.get("approval_kind") == "owner_exact_phrase_once":
+            # Paid orders and external-account mutations intentionally have no
+            # approve button or slash-command fallback.  Showing those controls
+            # would imply they can authorize the action even though the central
+            # resolver correctly refuses them.
+            phrase = str(approval_data.get("required_phrase") or "CONFIRM_DELETE")
+            request_id = str(approval_data.get("request_id") or "")[:12]
+            msg = (
+                "⚠️ 主人高风险操作待确认\n\n"
+                f"{desc}\n\n"
+                f"如确认本次操作，请在当前会话单独发送（不要加空格或其他文字）：\n{phrase}\n\n"
+                "本口令仅放行这一笔，5 分钟后失效；普通 yes/ok、按钮、"
+                f"/approve、会话或永久授权均无效。\n请求：{request_id}"
+            )
+            try:
+                metadata = {**(ctx._status_thread_metadata or {}), "is_approval_prompt": True}
+                fut = self._schedule(
+                    adapter.send(
+                        ctx._status_chat_id, msg,
+                        metadata=_interim_metadata(metadata),
+                    ),
+                    "Owner exact-phrase approval text-send scheduling error",
+                )
+                if fut is None:
+                    raise RuntimeError("owner exact-phrase approval: loop unavailable")
+                fut.result(timeout=15)
+                return
+            except Exception as e:
+                logger.error("Failed to send owner exact-phrase approval request: %s", e)
+                raise
         # Check the *class*, not the instance — MagicMock auto-creates attributes in tests.
         if getattr(type(adapter), "send_exec_approval", None) is not None:
             try:
@@ -1438,6 +1483,11 @@ class TurnRunner:
             # turn so a restart-interrupted turn is recorded WITH its id for drain-window dedup.
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
+                kwargs["trusted_user_message_id"] = str(ctx.inbound_message_id)
+            if ctx.inbound_author_text is not None:
+                kwargs["trusted_user_message"] = ctx.inbound_author_text
+            if ctx.inbound_internal is not None:
+                kwargs["trusted_user_message_internal"] = bool(ctx.inbound_internal)
             return agent.run_conversation(api_message, **kwargs)
         finally:
             unregister_gateway_notify(session_key)
@@ -1631,7 +1681,20 @@ class TurnRunner:
                 model, runtime_kwargs.get("provider"), ctx.session_key or "",
             )
         except Exception as exc:
-            return {"final_response": f"⚠️ Provider authentication failed: {exc}", "messages": [], "api_calls": 0, "tools": []}
+            # Keep the raw provider exception in diagnostics, but never make a user decipher it or
+            # risk echoing credential-shaped provider details into chat.  This is a display-boundary
+            # translation only; programmatic /v1 run surfaces retain their diagnostic error shape.
+            logger.warning(
+                "Provider authentication failed before agent creation for session=%s: %s",
+                ctx.session_key or "", exc,
+            )
+            phrase = getattr(ctx, "_user_phrase", None)
+            final_response = (
+                phrase("provider.authentication_failed") if callable(phrase)
+                else "⚠️ Provider authentication failed. Check the configured account authorization "
+                     "or API key; raw provider details are in the Gateway logs."
+            )
+            return {"final_response": final_response, "messages": [], "api_calls": 0, "tools": []}
         pr = runner._provider_routing
         reasoning_config = runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model)
         runner._reasoning_config = reasoning_config

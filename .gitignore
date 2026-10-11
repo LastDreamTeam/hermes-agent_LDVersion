@@ -220,3 +220,54 @@ native/fts5_cjk/*.so
 
 # Disposable profile created by scripts/probe_active_session_exclusivity.py
 .probe-home/
+
+# LD public-source boundary. Bot instances are never stored in this repository.
+/.instance/
+/profiles/
+/memories/
+/memory/
+/notes/
+/sessions/
+/a2a_conversations/
+/logs/
+/private/
+/outbox/
+/maintenance/candidates/
+/game-projects/
+/主人事务/
+/舰队/
+/交付/
+/回捞/
+/发送临时/
+/config.yaml
+/runtime.json
+/runtime.env
+/gateway_state.json
+/channel_directory.json
+/USER.md
+/MEMORY.md
+**/.env
+**/.env.local
+**/bridge.env
+**/auth.json
+**/auth.json.*
+**/.git-credentials
+**/.vaultkey
+**/credential-inventory.yaml
+**/tencent_docs_token.json
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/*.pem
+**/*.p12
+**/*.pfx
+**/*.gpg
+**/*.7z
+**/*.bak*
+**/*.before-*
+/.trusted-manifest.json
+/test_durations.json
+
+# Upstream SOUL.md / AGENTS.md are public templates, not instance copies.
+# The LD admission check rejects changes to them and newly added private Markdown.

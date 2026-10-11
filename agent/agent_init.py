@@ -1319,6 +1319,20 @@ def _apply_agent_section(agent, _agent_cfg):
     # "auto" (codex_responses only), true (all api_modes), false, or model substrings.
     agent._intent_ack_continuation = _agent_section.get("intent_ack_continuation", "auto")
 
+    # High-precision promise guard rollout: ``shadow`` records decisions without
+    # re-prompting, ``enforce`` keeps the normal continuation behavior, and ``off``
+    # disables only this final-response guard.  The environment override lets a
+    # trusted release select shadow mode without rewriting user/profile YAML.
+    _promise_guard_mode = str(
+        os.environ.get(
+            "HERMES_PROMISE_GUARD_MODE",
+            _agent_section.get("promise_guard_mode", "shadow"),
+        )
+    ).strip().lower()
+    agent._promise_guard_mode = (
+        _promise_guard_mode if _promise_guard_mode in {"off", "shadow", "enforce"} else "shadow"
+    )
+
     # Default-on boolean gates: anti-stall guards (notice-only), universal guidance toggles
     # (ALL models, unlike enforcement), the local toolchain probe, Bot Mode protocol section.
     for _key in (

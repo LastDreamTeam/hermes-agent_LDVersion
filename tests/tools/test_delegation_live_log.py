@@ -24,6 +24,7 @@ from tools.delegation_live_log import (
     create_live_transcripts,
     live_transcript_root,
     prune_stale_live_dirs,
+    update_manifest_task_status,
     update_manifest_statuses,
     wrap_progress_callback,
 )
@@ -92,6 +93,67 @@ def test_observe_maps_child_callback_events_to_lines():
     assert "final reply streamed in parts" in text
     assert "status=completed" in text
     assert "did the thing" in text
+
+
+def test_child_completion_updates_manifest_before_batch_aggregate():
+    """A finished child must not remain ``running`` while siblings continue."""
+    delegation_id, writers, _paths = create_live_transcripts(
+        [{"goal": "first"}, {"goal": "second"}]
+    )
+
+    writers[0].observe(
+        "subagent.complete", preview="done", status="completed",
+        duration_seconds=1.2, summary="first done",
+    )
+
+    manifest = json.loads(
+        (live_transcript_root() / delegation_id / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["tasks"][0]["status"] == "completed"
+    assert manifest["tasks"][0]["status_source"] == "subagent.complete"
+    assert manifest["tasks"][0]["status_updated_at"]
+    assert manifest["tasks"][1]["status"] == "running"
+    assert "completed" not in manifest
+
+
+def test_finalize_updates_manifest_and_marks_all_terminal():
+    delegation_id, writers, _paths = create_live_transcripts(
+        [{"goal": "first"}, {"goal": "second"}]
+    )
+
+    writers[0].finalize({"status": "completed", "exit_reason": "completed"})
+    writers[1].finalize({"status": "error", "exit_reason": "provider_error"})
+
+    manifest = json.loads(
+        (live_transcript_root() / delegation_id / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert [t["status"] for t in manifest["tasks"]] == ["completed", "error"]
+    assert manifest["tasks"][1]["exit_reason"] == "provider_error"
+    assert manifest["completed"] == manifest["updated_at"]
+
+
+def test_parallel_manifest_updates_preserve_both_children():
+    delegation_id, _writers, _paths = create_live_transcripts(
+        [{"goal": "first"}, {"goal": "second"}]
+    )
+
+    threads = [
+        threading.Thread(
+            target=update_manifest_task_status,
+            args=(delegation_id, index, "completed"),
+        )
+        for index in (0, 1)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive(), "manifest update deadlocked"
+
+    manifest = json.loads(
+        (live_transcript_root() / delegation_id / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert [t["status"] for t in manifest["tasks"]] == ["completed", "completed"]
 
 
 def test_finalize_records_budget_exhaustion_and_errors():

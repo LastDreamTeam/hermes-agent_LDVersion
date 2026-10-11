@@ -148,6 +148,61 @@ class TestSessionHygieneThresholds:
         # Should NOT trigger for 1M model
         assert approx_tokens < huge_model_threshold
 
+    def test_config_accepts_independent_ratio_and_absolute_cap(self):
+        """The availability-first hygiene pass can pre-empt the synchronous agent
+        compressor without changing the agent's own threshold."""
+        gateway_run = importlib.import_module("gateway.run")
+        runner = object.__new__(gateway_run.GatewayRunner)
+        hs = runner._HygieneSettings(
+            model="deepseek-v4-flash", threshold_pct=0.85,
+            threshold_tokens_cap=None, compression_enabled=True,
+            hard_msg_limit=5000, timeout_seconds=30.0,
+            total_ceiling_seconds=600.0, max_turn_hold_seconds=10.0,
+            failure_cooldown_seconds=300.0, config_context_length=None,
+            provider="deepseek", base_url=None, api_key="fake", data={}, notify_turn_hold=True,
+        )
+
+        runner._hmwa_hygiene_read_config(hs, {"compression": {
+            "hygiene_threshold": 0.40,
+            "hygiene_threshold_tokens": 180_000,
+            "hygiene_max_turn_hold_seconds": 1.0,
+            "hygiene_notify_turn_hold": False,
+        }})
+
+        assert hs.threshold_pct == 0.40
+        assert hs.threshold_tokens_cap == 180_000
+        assert hs.max_turn_hold_seconds == 1.0
+        assert hs.notify_turn_hold is False
+
+    @pytest.mark.asyncio
+    async def test_absolute_cap_triggers_before_large_context_ratio(self, monkeypatch):
+        """A 1M-context model should trigger at the configured 180K cap, not
+        wait for the legacy 85%-of-window emergency threshold."""
+        gateway_run = importlib.import_module("gateway.run")
+        runner = object.__new__(gateway_run.GatewayRunner)
+        runner._session_db = None
+        runner._session_has_compression_in_flight = AsyncMock(return_value=False)
+        hs = runner._HygieneSettings(
+            model="deepseek-v4-flash", threshold_pct=0.85,
+            threshold_tokens_cap=180_000, compression_enabled=True,
+            hard_msg_limit=5000, timeout_seconds=30.0,
+            total_ceiling_seconds=600.0, max_turn_hold_seconds=1.0,
+            failure_cooldown_seconds=300.0, config_context_length=1_000_000,
+            provider="deepseek", base_url=None, api_key="fake", data={}, notify_turn_hold=False,
+        )
+        entry = SimpleNamespace(last_prompt_tokens=200_000, session_id="sess-1")
+        monkeypatch.setattr(
+            "agent.model_metadata.get_model_context_length_async",
+            AsyncMock(return_value=1_000_000),
+        )
+
+        plan = await runner._hmwa_hygiene_plan(
+            hs, _make_history(8), entry, "agent:main:qqbot:dm:owner",
+        )
+
+        assert plan.needs_compress is True
+        assert plan.approx_tokens == 200_000
+
 
 def test_hygiene_total_ceiling_warning_reports_elapsed_and_progress():
     from gateway.run import _hygiene_compression_timeout_message

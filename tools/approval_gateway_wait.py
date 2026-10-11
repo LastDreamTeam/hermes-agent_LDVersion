@@ -24,9 +24,15 @@ logger = logging.getLogger("tools.approval")
 
 class _ApprovalEntry:
     """One pending dangerous-command approval inside a gateway session."""
-    __slots__ = ("event", "data", "result", "reason", "acknowledged")
+    __slots__ = (
+        "event", "data", "result", "reason", "acknowledged",
+        "policy", "origin_principal", "expires_at",
+    )
 
-    def __init__(self, data: dict):
+    def __init__(
+        self, data: dict, *, policy: str = "", origin_principal=None,
+        timeout_s: float | None = None,
+    ):
         self.event = threading.Event()
         self.data = dict(data)
         self.data.setdefault("request_id", uuid.uuid4().hex)
@@ -34,9 +40,20 @@ class _ApprovalEntry:
         self.result: str | None = None  # "once"|"session"|"always"|"deny"
         # Free-text reason from ``/deny <reason>`` so the agent can adapt, not just hear "denied".
         self.reason: str | None = None
+        self.policy = str(policy or "")
+        # Kept out of ``data`` so adapters/frontends never receive the private
+        # identity tuple used to bind a high-impact approval to its originator.
+        self.origin_principal = tuple(origin_principal or ())
+        self.expires_at = (
+            time.monotonic() + max(float(timeout_s), 0.0)
+            if timeout_s is not None else None
+        )
 
 
-def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str) -> str:
+def _poll_event(
+    event: threading.Event, session_key: str, *, interrupt_log: str,
+    deadline: float | None = None,
+) -> str:
     """Wait on *event* until it fires, the turn is interrupted, or approvals.timeout
     elapses; returns ``"set"`` | ``"interrupted"`` | ``"timeout"``. Polls in ~1s
     slices so activity heartbeats reach the agent's inactivity tracker every ~10s —
@@ -49,7 +66,10 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
     The per-thread interrupt flag carries no stable machine-checkable cause, so a
     fail-closed deny preserves the historical semantics; changing this needs a
     dedicated interrupt-cause channel, not string matching."""
-    deadline = time.monotonic() + max(_ctx._get_approval_timeout(), 0)
+    deadline = (
+        deadline if deadline is not None
+        else time.monotonic() + max(_ctx._get_approval_timeout(), 0)
+    )
     heartbeat = activity_heartbeat("waiting for user approval")
     with human_wait_window(session_key):
         while True:
@@ -59,6 +79,12 @@ def _poll_event(event: threading.Event, session_key: str, *, interrupt_log: str)
             if is_interrupted():
                 logger.info(interrupt_log, session_key)
                 return "interrupted"
+            # Resolver validates the dedicated expiry while holding the queue
+            # lock.  Check a signalled event before recomputing remaining time
+            # so a consent accepted just before the deadline is not reported as
+            # both successful to the user and timed out to the tool thread.
+            if event.is_set():
+                return "set"
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return "timeout"
@@ -102,7 +128,10 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
     return _finish(payload, resolved, choice, getattr(leader, "reason", None), coalesced=True)
 
 
-def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *, surface: str = "gateway") -> dict:
+def _await_gateway_decision(
+    session_key: str, notify_cb, approval_data: dict, *, surface: str = "gateway",
+    policy: str = "", origin_principal=None, timeout_s: float | None = None,
+) -> dict:
     """Enqueue *approval_data*, notify the user, and block until resolved or timed
     out. Shared by the terminal command guard, the execute_code guard, the plugin
     escalation gate, and MCP elicitation. Returns ``{"resolved", "choice",
@@ -127,15 +156,24 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
     }
     keys = list(approval_data.get("pattern_keys") or [])
     with _approval._lock:
-        leader = next((e for e in _approval._gateway_queues.get(session_key, [])
-                       if e.data.get("command") == approval_data.get("command")
-                       and list(e.data.get("pattern_keys") or []) == keys), None)
+        # A paid order/account mutation is always a distinct financial action.
+        # It may never inherit a concurrent approval, even if every visible
+        # argument happens to be identical.
+        leader = None if policy else next((
+            e for e in _approval._gateway_queues.get(session_key, [])
+            if not getattr(e, "policy", "")
+            and e.data.get("command") == approval_data.get("command")
+            and list(e.data.get("pattern_keys") or []) == keys
+        ), None)
     if leader is not None:
         adopted = _await_coalesced_leader(session_key, leader, payload)
         if adopted is not None:
             return adopted
 
-    entry = _ApprovalEntry(approval_data)
+    entry = _ApprovalEntry(
+        approval_data, policy=policy, origin_principal=origin_principal,
+        timeout_s=timeout_s,
+    )
     with _approval._lock:
         _approval._gateway_queues.setdefault(session_key, []).append(entry)
 
@@ -158,8 +196,11 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *,
         _ctx._fire_approval_hook("post_approval_response", **payload, choice="notify_failed")
         return {"resolved": False, "choice": None, "notify_failed": True}
 
-    state = _poll_event(entry.event, session_key,
-                        interrupt_log="Approval wait interrupted by user signal — returning deny for session %s")
+    state = _poll_event(
+        entry.event, session_key,
+        interrupt_log="Approval wait interrupted by user signal — returning deny for session %s",
+        deadline=entry.expires_at,
+    )
     if state == "interrupted":
         entry.result = "deny"
         entry.event.set()

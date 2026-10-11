@@ -383,7 +383,64 @@ class GatewayBusySessionMixin:
         # not queue behind a turn that can't start until it resolves (auto-deny deadlock). Gated on
         # has_blocking_approval so a conversational "yes" never fires a command.
         try:
-            from tools.approval import has_blocking_approval
+            from tools.approval import (
+                OWNER_HIGH_IMPACT_PHRASE,
+                get_pending_owner_high_impact_approval,
+                has_blocking_approval,
+                owner_high_impact_principal_from_source,
+                resolve_owner_high_impact_approval,
+            )
+            # Owner financial/account mutations have a separate, exact one-shot
+            # consent lane.  Do not normalize the raw text and do not synthesize
+            # /approve: whitespace, punctuation, buttons and ordinary yes/ok must
+            # not become equivalent to the owner's phrase.
+            _owner_pending = get_pending_owner_high_impact_approval(session_key)
+            if (
+                _owner_pending is not None
+                and (event.text or "") == OWNER_HIGH_IMPACT_PHRASE
+            ):
+                _resolved = 0
+                if not getattr(event, "internal", False) and event.allow_gateway_control:
+                    try:
+                        _authorized = self._is_user_authorized_for_source(event.source)
+                    except Exception:
+                        _authorized = False
+                    _principal = owner_high_impact_principal_from_source(event.source)
+                    if _authorized and _principal:
+                        _resolved = resolve_owner_high_impact_approval(
+                            session_key,
+                            event.text or "",
+                            str(_owner_pending.get("request_id") or ""),
+                            _principal,
+                        )
+                # Consume an exact phrase while a protected request is pending
+                # even when identity/expiry validation failed.  It must never be
+                # queued as ordinary conversational text and replayed later.
+                _adapter = self._adapter_for_source(event.source)
+                if _adapter and event.allow_gateway_control:
+                    if _resolved:
+                        with contextlib.suppress(Exception):
+                            _adapter.resume_typing_for_chat(event.source.chat_id)
+                    await self._send_busy_reply(
+                        event, _adapter,
+                        (
+                            "✅ 已收到主人本次精确确认；仅放行这一项操作。"
+                            if _resolved else
+                            "❌ 本次确认未通过身份、会话或有效期校验；操作仍被阻止。"
+                        ),
+                        plain_anchor=True,
+                    )
+                if _resolved:
+                    logger.info(
+                        "Owner exact-phrase approval resolved: session=%s request=%s",
+                        session_key, _owner_pending.get("request_id"),
+                    )
+                else:
+                    logger.warning(
+                        "Owner exact-phrase approval rejected: session=%s request=%s",
+                        session_key, _owner_pending.get("request_id"),
+                    )
+                return True
             # --- Approval response routing (#46866) --- When the agent is blocked waiting for a
             # dangerous-command approval, plain-text responses like "yes" or "approve" must be routed to the
             # approval handler instead of being steered/queued/interrupted. Slash forms (/approve, /deny)
@@ -534,62 +591,84 @@ class GatewayBusySessionMixin:
         demoted_for_subagents: bool, demoted_for_compression: bool,
     ) -> str:
         from gateway.run import (
-            _AGENT_PENDING_SENTINEL, _hermes_home, _load_gateway_config, _platform_config_key
+            _AGENT_PENDING_SENTINEL, _gateway_config_home, _hermes_home, _load_gateway_config,
+            _platform_config_key,
         )
         from gateway.display_config import resolve_display_setting
+        from gateway.user_phrases import format_busy_details, resolve_user_phrase
+
+        # Busy acknowledgements run before the normal turn wrapper enters its profile scope.  Resolve
+        # the routed profile explicitly so each bot gets its own language/phrase table.
+        if getattr(getattr(self, "config", None), "multiplex_profiles", False) is True:
+            with self._profile_scope_for_source(event.source):
+                _user_config = _load_gateway_config()
+                _platform_key = _platform_config_key(event.source.platform)
+                _profile_home = _gateway_config_home()
+        else:
+            _user_config = _load_gateway_config()
+            _platform_key = _platform_config_key(event.source.platform)
+            _profile_home = _hermes_home
 
         # Terse by default; iteration/tool detail opts in via display.platforms.<p>.busy_ack_detail.
-        status_parts = []
         busy_ack_detail_enabled = bool(
             resolve_display_setting(
-                _load_gateway_config(), _platform_config_key(event.source.platform),
+                _user_config, _platform_key,
                 "busy_ack_detail", True,
             )
         )
+        elapsed_min = None
+        iteration = None
+        max_iterations = None
+        current_tool = None
         if busy_ack_detail_enabled and running_agent and running_agent is not _AGENT_PENDING_SENTINEL:
             try:
                 summary = running_agent.get_activity_summary()
                 elapsed_min = 0
                 if _busy_state and _busy_state.turn.started_ts:
                     elapsed_min = int((now - _busy_state.turn.started_ts) / 60)
-                if elapsed_min > 0:
-                    status_parts.append(f"{elapsed_min} min elapsed")
-                if summary.get("max_iterations", 0):
-                    status_parts.append(
-                        f"iteration {summary.get('api_call_count', 0)}/{summary.get('max_iterations', 0)}"
-                    )
-                if summary.get("current_tool"):
-                    status_parts.append(f"running: {summary.get('current_tool')}")
+                iteration = summary.get("api_call_count", 0)
+                max_iterations = summary.get("max_iterations", 0)
+                current_tool = summary.get("current_tool")
             except Exception:
                 pass
-        status_detail = f" ({', '.join(status_parts)})" if status_parts else ""
+        status_detail = format_busy_details(
+            user_config=_user_config, elapsed_minutes=elapsed_min, iteration=iteration,
+            max_iterations=max_iterations, tool_name=current_tool, home=_profile_home,
+        )
         if is_steer_mode:
-            head, tail = "⏩ Steered into current run", ". Your message arrives after the next tool call."
+            phrase_key = "busy.steer"
         elif is_redirect_mode:
-            head, tail = "↪ Redirected current run", ". I'll adjust using your correction."
+            phrase_key = "busy.redirect"
         elif is_queue_mode and demoted_for_subagents:
             # Explain the demotion: the follow-up didn't kill the subagent; /stop is the escape hatch.
-            head, tail = "⏳ Subagent working", self._BUSY_DEMOTED_TAIL
+            phrase_key = "busy.subagent"
         elif is_queue_mode and demoted_for_compression:
-            head, tail = "⏳ Compressing context", self._BUSY_DEMOTED_TAIL
+            phrase_key = "busy.compress"
         elif is_queue_mode:
-            head, tail = "⏳ Queued for the next turn", ". I'll respond once the current task finishes."
+            phrase_key = "busy.queue"
         else:
-            head, tail = "⚡ Interrupting current task", ". I'll respond to your message shortly."
-        message = f"{head}{status_detail}{tail}"
+            phrase_key = "busy.interrupt"
+        message = resolve_user_phrase(
+            phrase_key, user_config=_user_config, platform_key=_platform_key,
+            home=_profile_home, details=status_detail,
+        )
 
         # One-time onboarding hint about the queue/interrupt knob (flag persisted to config.yaml).
         try:
-            from agent.onboarding import (BUSY_INPUT_FLAG, busy_input_hint_gateway, is_seen, mark_seen)
-            if not is_seen(_load_gateway_config(), BUSY_INPUT_FLAG):
+            from agent.onboarding import BUSY_INPUT_FLAG, is_seen, mark_seen
+            if not is_seen(_user_config, BUSY_INPUT_FLAG):
                 _hint_mode = (
                     "steer" if is_steer_mode
                     else "queue" if is_queue_mode
                     else "redirect" if is_redirect_mode
                     else "interrupt"
                 )
-                message = f"{message}\n\n{busy_input_hint_gateway(_hint_mode)}"
-                mark_seen(_hermes_home / "config.yaml", BUSY_INPUT_FLAG)
+                hint = resolve_user_phrase(
+                    f"onboarding.busy.{_hint_mode}", user_config=_user_config,
+                    platform_key=_platform_key, home=_profile_home,
+                )
+                message = f"{message}\n\n{hint}"
+                mark_seen(_profile_home / "config.yaml", BUSY_INPUT_FLAG)
         except Exception as _onb_err:
             logger.debug("Failed to apply busy-input onboarding hint: %s", _onb_err)
         return message

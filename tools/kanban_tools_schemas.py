@@ -89,11 +89,16 @@ KANBAN_COMPLETE_SCHEMA = _schema(
     "kanban_complete",
     (
         "Mark your current task done with a structured handoff for "
-        "downstream workers and humans. Prefer ``summary`` for a "
-        "human-readable 1-3 sentence description of what you did; put "
+        "downstream workers and humans. Use ``summary`` for a "
+        "human-readable 1-3 sentence notification of what you did. If the "
+        "useful deliverable is prose, findings, or advice rather than a file, "
+        "put its full self-contained text in ``result``; do not leave it only "
+        "in your final assistant response or worker log. Put "
         "machine-readable facts in ``metadata`` (changed_files, "
         "tests_run, decisions, findings, etc). At least one of "
-        "``summary`` or ``result`` is required. If you created new "
+        "``summary`` or ``result`` is required. A short ``summary`` is not a "
+        "substitute for ``result`` or ``artifacts`` when the task has a "
+        "substantive deliverable. If you created new "
         "tasks via ``kanban_create`` during this run, list their ids "
         "in ``created_cards`` — the kernel verifies them so phantom "
         "references are caught before they leak into downstream "
@@ -118,10 +123,13 @@ KANBAN_COMPLETE_SCHEMA = _schema(
                 "workers alongside ``summary``."
         )),
         "result": _prop("string", (
-                "Short result log line (legacy field, maps to "
-                "task.result). Use ``summary`` instead when "
-                "possible; this exists for compatibility with "
-                "callers that still set --result on the CLI."
+                "Full self-contained textual deliverable (maps to "
+                "task.result). For research, recommendations, analysis, or "
+                "other prose-only work, include all useful outcome text here "
+                "and keep ``summary`` short. Omit only when the durable "
+                "deliverable is already represented by ``artifacts`` or the "
+                "task is a lifecycle-only transition with no substantive "
+                "output."
         )),
         "created_cards": {
             "type": "array",

@@ -159,9 +159,17 @@ def mcp_call(url: str, tool: str, arguments: Dict[str, Any], timeout: int = _TIM
         response = requests.post(url, json=payload, headers=headers, timeout=timeout)
     except requests.RequestException as exc:
         raise KeylessMCPError(f"request failed: {exc}") from exc
+    try:
+        # JSON and Server-Sent Events are UTF-8.  Some public MCP endpoints omit
+        # ``charset`` from ``text/event-stream``; requests then defaults
+        # ``response.text`` to ISO-8859-1, which can turn UTF-8 bytes into C1
+        # control characters and split a JSON event in the middle of a line.
+        response_body = response.content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise KeylessMCPError(f"response body is not valid UTF-8: {exc}") from exc
     if response.status_code >= 400:
-        raise KeylessMCPError(f"HTTP {response.status_code}: {response.text[:300]}")
-    return _parse_mcp_body(response.text)
+        raise KeylessMCPError(f"HTTP {response.status_code}: {response_body[:300]}")
+    return _parse_mcp_body(response_body)
 
 
 # --- Parallel (search.parallel.ai) — JSON text payloads -----------------------

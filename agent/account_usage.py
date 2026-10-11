@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Callable, Optional
 import httpx
 
 from agent.anthropic_credentials import _is_oauth_token, resolve_anthropic_token
+from agent.i18n import zh_text
 from hermes_cli.auth import AuthError, _read_codex_tokens, resolve_codex_runtime_credentials
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -17,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEPLETED_LINE = "Status: access depleted — top up to restore"
+_DEPLETED_LINE = zh_text("Status: access depleted — top up to restore", "状态：额度已耗尽——充值后恢复")
 
 
 def _utc_now() -> datetime:
@@ -74,17 +75,21 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 
 def _format_reset(dt: Optional[datetime]) -> str:
     if not dt:
-        return "unknown"
+        return zh_text("unknown", "未知")
     stamp = dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     total_seconds = int((dt - _utc_now()).total_seconds())
     if total_seconds <= 0:
-        return f"now ({stamp})"
+        return zh_text("now ({stamp})", "现在（{stamp}）", stamp=stamp)
     hours, rem = divmod(total_seconds, 3600)
     minutes = rem // 60
     if hours >= 24:
         days, hours = divmod(hours, 24)
-        return f"in {days}d {hours}h ({stamp})"
-    return f"in {hours}h {minutes}m ({stamp})" if hours else f"in {minutes}m ({stamp})"
+        return zh_text("in {days}d {hours}h ({stamp})", "{days} 天 {hours} 小时后（{stamp}）",
+                       days=days, hours=hours, stamp=stamp)
+    if hours:
+        return zh_text("in {hours}h {minutes}m ({stamp})", "{hours} 小时 {minutes} 分钟后（{stamp}）",
+                       hours=hours, minutes=minutes, stamp=stamp)
+    return zh_text("in {minutes}m ({stamp})", "{minutes} 分钟后（{stamp}）", minutes=minutes, stamp=stamp)
 
 
 def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, markdown: bool = False) -> list[str]:
@@ -92,21 +97,27 @@ def render_account_usage_lines(snapshot: Optional[AccountUsageSnapshot], *, mark
         return []
     bold = "**" if markdown else ""
     plan = f" ({snapshot.plan})" if snapshot.plan else ""
-    lines = [f"📈 {bold}{snapshot.title}{bold}", f"Provider: {snapshot.provider}{plan}"]
+    title = zh_text(snapshot.title, "Nous 额度" if snapshot.title == "Nous credits" else snapshot.title)
+    lines = [f"📈 {bold}{title}{bold}", zh_text(
+        "Provider: {provider}{plan}", "提供方：{provider}{plan}", provider=snapshot.provider, plan=plan)]
     for window in snapshot.windows:
         if window.used_percent is None:
-            base = f"{window.label}: unavailable"
+            base = zh_text("{label}: unavailable", "{label}：不可用", label=window.label)
         else:
             used = float(window.used_percent)
-            base = f"{window.label}: {max(0, round(100 - used))}% remaining ({max(0, round(used))}% used)"
+            base = zh_text(
+                "{label}: {remaining}% remaining ({used}% used)",
+                "{label}：剩余 {remaining}%（已用 {used}%）",
+                label=window.label, remaining=max(0, round(100 - used)), used=max(0, round(used)),
+            )
         if window.reset_at:
-            base += f" • resets {_format_reset(window.reset_at)}"
+            base += zh_text(" • resets {when}", " • 重置时间：{when}", when=_format_reset(window.reset_at))
         elif window.detail:
             base += f" • {window.detail}"
         lines.append(base)
     lines.extend(snapshot.details)
     if snapshot.unavailable_reason:
-        lines.append(f"Unavailable: {snapshot.unavailable_reason}")
+        lines.append(zh_text("Unavailable: {reason}", "不可用：{reason}", reason=snapshot.unavailable_reason))
     return lines
 
 
@@ -149,25 +160,31 @@ def build_nous_credits_snapshot(account_info) -> Optional[AccountUsageSnapshot]:
             sub_remaining = getattr(sub, "credits_remaining", None)
             if _is_finite_num(cap) and cap > 0 and _is_finite_num(sub_remaining) and sub_remaining <= cap:
                 windows.append(AccountUsageWindow(
-                    label="Subscription", used_percent=max(0.0, min(100.0, (cap - sub_remaining) / cap * 100.0)),
-                    detail=f"{_fmt_usd(sub_remaining)} of {_fmt_usd(cap)} left",
+                    label=zh_text("Subscription", "订阅"),
+                    used_percent=max(0.0, min(100.0, (cap - sub_remaining) / cap * 100.0)),
+                    detail=zh_text("{left} of {total} left", "剩余 {left} / {total}",
+                                   left=_fmt_usd(sub_remaining), total=_fmt_usd(cap)),
                 ))
         if access is not None:
-            for attr, label in (("subscription_credits_remaining", "Subscription credits"),
-                                ("purchased_credits_remaining", "Top-up credits"), ("total_usable_credits", "Total usable")):
+            for attr, label in (("subscription_credits_remaining", zh_text("Subscription credits", "订阅额度")),
+                                ("purchased_credits_remaining", zh_text("Top-up credits", "充值额度")),
+                                ("total_usable_credits", zh_text("Total usable", "可用总额"))):
                 value = getattr(access, attr, None)
                 if _is_finite_num(value):
                     details.append(f"{label}: {_fmt_usd(value)}")
         if sub is not None:
             rollover = getattr(sub, "rollover_credits", None)
             if _is_finite_num(rollover) and rollover > 0:
-                details.append(f"Rollover: {_fmt_usd(rollover)}")
+                details.append(zh_text("Rollover: {value}", "结转额度：{value}", value=_fmt_usd(rollover)))
             period_end = getattr(sub, "current_period_end", None)
             if period_end:
-                details.append(f"Renews: {period_end}")
+                details.append(zh_text("Renews: {value}", "续期时间：{value}", value=period_end))
         if getattr(account_info, "paid_service_access", None) is False:
             details.append(_DEPLETED_LINE)
-        return _nous_snapshot(windows, details, [f"Top up: {nous_portal_topup_url(account_info)}", "(or run /topup)"],
+        return _nous_snapshot(windows, details, [
+            zh_text("Top up: {url}", "充值：{url}", url=nous_portal_topup_url(account_info)),
+            zh_text("(or run /topup)", "（或执行 /topup）"),
+        ],
                               source="portal-account", plan=getattr(sub, "plan", None) if sub is not None else None)
     except (AttributeError, TypeError):
         return None
@@ -226,16 +243,20 @@ def _snapshot_from_credits_state(state) -> Optional[AccountUsageSnapshot]:
         cap_usd = getattr(state, "subscription_limit_usd", None)
         if _is_num(uf) and math.isfinite(uf):
             windows.append(AccountUsageWindow(
-                label="Subscription", used_percent=max(0.0, min(100.0, uf * 100.0)),
-                detail=f"${sub_usd} of ${cap_usd} left" if sub_usd and cap_usd else None,
+                label=zh_text("Subscription", "订阅"), used_percent=max(0.0, min(100.0, uf * 100.0)),
+                detail=(zh_text("${left} of ${total} left", "剩余 ${left} / ${total}", left=sub_usd, total=cap_usd)
+                        if sub_usd and cap_usd else None),
             ))
-        for value, label in ((sub_usd, "Subscription credits"), (getattr(state, "purchased_usd", None), "Top-up credits"),
-                             (getattr(state, "remaining_usd", None), "Total usable")):
+        for value, label in ((sub_usd, zh_text("Subscription credits", "订阅额度")),
+                             (getattr(state, "purchased_usd", None), zh_text("Top-up credits", "充值额度")),
+                             (getattr(state, "remaining_usd", None), zh_text("Total usable", "可用总额"))):
             if value:
                 details.append(f"{label}: ${value}")
         if getattr(state, "paid_access", True) is False:
             details.append(_DEPLETED_LINE)
-        return _nous_snapshot(windows, details, ["(dev fixture — HERMES_DEV_CREDITS_FIXTURE)"], source="dev-fixture")
+        return _nous_snapshot(windows, details, [zh_text(
+            "(dev fixture — HERMES_DEV_CREDITS_FIXTURE)", "（开发测试数据——HERMES_DEV_CREDITS_FIXTURE）")],
+            source="dev-fixture")
     except (AttributeError, TypeError):
         return None
 
@@ -270,7 +291,7 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
     balance_lines = [
         line
         for line in render_account_usage_lines(build_nous_credits_snapshot(account), markdown=markdown)
-        if not line.lstrip().startswith(("Top up:", "(or run"))
+        if not line.lstrip().startswith(("Top up:", "(or run", "充值：", "（或执行"))
     ]
     who = [str(v) for v in (getattr(account, "email", None),) if v]
     org_name = getattr(account, "org_name", None)
@@ -278,7 +299,8 @@ def build_credits_view(*, markdown: bool = False, timeout: float = 10.0) -> Cred
         who.append(f"org {org_name}")
     return CreditsView(
         logged_in=True, balance_lines=tuple(balance_lines),
-        identity_line=("Topping up as " + " / ".join(who)) if who else None, topup_url=nous_portal_topup_url(account),
+        identity_line=(zh_text("Topping up as ", "当前充值身份：") + " / ".join(who)) if who else None,
+        topup_url=nous_portal_topup_url(account),
         depleted=getattr(account, "paid_service_access", None) is False,
     )
 

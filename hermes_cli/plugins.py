@@ -501,12 +501,15 @@ class PluginContext:
 
     def call_mcp(
         self, server: str, tool: str, arguments: Optional[Dict[str, Any]] = None,
-        timeout: float = 30,
+        timeout: float = 30, *, allow_replay: bool = True,
     ) -> Dict[str, Any]:
         """Call ``tool`` on MCP ``server`` synchronously through :mod:`tools.mcp_tool`'s native client
         (same trust gates, breaker, reconnect — never a parallel connection). Servers not in
         ``plugins.entries.<plugin_id>.mcp_allowlist`` raise ``PermissionError`` (default-deny). ``timeout``
         clamps to 1–600s; results over ~64KB are truncated with a marker.
+        Plugins wrapping financial or other non-idempotent mutations must pass
+        ``allow_replay=False`` so reconnect recovery cannot repeat a dispatched
+        RPC, even when the upstream manifest omits an idempotency annotation.
 
         This is a per-server grant, deliberately not ambient authority over every configured server.
         TODO(#64228): swap the per-server allowlist for the declared capability model once it lands
@@ -524,8 +527,12 @@ class PluginContext:
         except (TypeError, ValueError):
             timeout = 30.0
         timeout = max(1.0, min(timeout, 600.0))
+        if not isinstance(allow_replay, bool):
+            raise TypeError("allow_replay must be a bool")
         from tools.mcp_tool_handlers import _make_tool_handler
-        raw = _make_tool_handler(server, tool, timeout)(dict(arguments or {}))
+        raw = _make_tool_handler(
+            server, tool, timeout, allow_replay=allow_replay
+        )(dict(arguments or {}))
         logger.debug("Plugin %s called MCP %s/%s (timeout=%ss, %d chars returned)",
                      self.manifest.name, server, tool, timeout, len(raw or ""))
         return self._mcp_envelope(raw)
@@ -1848,14 +1855,26 @@ def _resolve_block_from_details(
     if details.action != "approve":
         return None
     try:
-        from tools.approval import request_tool_approval
+        from tools.approval import (
+            OWNER_HIGH_IMPACT_RULE_PREFIX,
+            request_owner_high_impact_approval,
+            request_tool_approval,
+        )
         from tools.approval_context import reset_current_observability_context, set_current_observability_context
         approval_tokens = None
         with suppress(Exception):
             approval_tokens = set_current_observability_context(
                 turn_id=turn_id, tool_call_id=tool_call_id, session_id=session_id)
         try:
-            result = request_tool_approval(tool_name, details.message or "", rule_key=details.rule_key or tool_name)
+            rule_key = details.rule_key or tool_name
+            if rule_key.startswith(OWNER_HIGH_IMPACT_RULE_PREFIX):
+                result = request_owner_high_impact_approval(
+                    tool_name, details.message or "", rule_key=rule_key,
+                )
+            else:
+                result = request_tool_approval(
+                    tool_name, details.message or "", rule_key=rule_key,
+                )
         finally:
             if approval_tokens is not None:
                 with suppress(Exception):

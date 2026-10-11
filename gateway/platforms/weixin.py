@@ -553,6 +553,20 @@ def _extract_text(item_list: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _extract_raw_author_text(item_list: List[Dict[str, Any]]) -> str:
+    """Return only the current author's directly typed text.
+
+    Reference payloads, provider STT and attachment metadata deliberately stay out of this value;
+    callers use it as a trusted authorization input independent from ``_extract_text`` enrichment.
+    """
+    for item in item_list:
+        if not isinstance(item, dict) or item.get("type") != ITEM_TEXT:
+            continue
+        text_item = item.get("text_item")
+        return str(text_item.get("text") or "") if isinstance(text_item, dict) else ""
+    return ""
+
+
 _MIME_PREFIX_TYPES = (("image/", MessageType.PHOTO), ("video/", MessageType.VIDEO), ("audio/", MessageType.VOICE))
 
 
@@ -889,6 +903,7 @@ class WeixinAdapter(BasePlatformAdapter):
         # Secondary content-fingerprint dedup: upstream re-sends identical text under new message_ids.
         item_list = message.get("item_list") or []
         text = _extract_text(item_list)
+        raw_author_text = _extract_raw_author_text(item_list)
         if text and self._dedup.is_duplicate(f"content:{sender_id}:{hashlib.md5(text.encode()).hexdigest()}"):
             logger.debug("[%s] Content-dedup: skipping duplicate message from %s", self.name, sender_id)
             return
@@ -913,7 +928,8 @@ class WeixinAdapter(BasePlatformAdapter):
         source = self.build_source(chat_id=effective_chat_id, chat_type=chat_type, user_id=sender_id, user_name=sender_id)
         event = MessageEvent(
             text=text, message_type=_message_type_from_media(media_types, text), source=source, raw_message=message,
-            message_id=message_id or None, media_urls=media_paths, media_types=media_types, timestamp=datetime.now())
+            message_id=message_id or None, media_urls=media_paths, media_types=media_types, timestamp=datetime.now(),
+            raw_author_text=raw_author_text)
         logger.info("[%s] inbound from=%s type=%s media=%d", self.name, _safe_id(sender_id), source.chat_type, len(media_paths))
         if event.message_type == MessageType.TEXT:
             self._enqueue_text_event(event)

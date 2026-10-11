@@ -4422,6 +4422,13 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
     # isn't engaged) and takes the deterministic approvals.single_query_mode path instead of waiting the
     # full timeout. See #86878.
     os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
+    # A -q/-Q process exits immediately after this turn and has no later drain
+    # loop that can own an async delegation completion.  Treat it exactly like
+    # the dedicated ``hermes -z`` one-shot path: background delegate requests
+    # fall back to the synchronous path, so their result returns before this
+    # process exits instead of becoming an unowned durable pending event.
+    from gateway.session_context import declare_stateless_channel
+    declare_stateless_channel()
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
         sys.exit(1)
     try:

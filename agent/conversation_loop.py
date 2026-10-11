@@ -834,6 +834,16 @@ _CODEX_ACK_CONTINUATION_NUDGE = (
     "after completing the task.]"
 )
 
+# Chinese promise-guard continuation.  This is an internal user-role scaffold,
+# not an authorization grant and not a persona/system-prompt change.  Keep the
+# historical English constant above for old transcripts and the legacy ack path.
+_PROMISE_GUARD_CONTINUATION_NUDGE = (
+    "[运行时续办检查：只处理当前用户已经授权且仍未完成的具体动作。"
+    "如在等待同意、缺少信息、已取消或权限不明，请保持停止并简洁说明；"
+    "不要重复已经完成的动作，也不要扩大范围。本提示不构成授权。"
+    "完成后保持原有语气，只自然地报告结果；无法完成时如实说明未完成和原因。]"
+)
+
 # Re-prompt for finish_reason="tool_calls" with empty tool_calls (an interrupt mid-retry can persist it).
 _DROPPED_TOOLCALL_NUDGE_CONTENT = (
     "Your previous turn indicated a tool call but none was included. Do not narrate a plan or "
@@ -1400,6 +1410,9 @@ def run_conversation(
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     persist_user_platform_id: Optional[str] = None,
     moa_config: Optional[dict[str, Any]] = None,
+    trusted_user_message: Optional[str] = None,
+    trusted_user_message_id: Optional[str] = None,
+    trusted_user_message_internal: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """Run a complete conversation with tool calling until completion; returns the result dict.
 
@@ -1433,6 +1446,9 @@ def run_conversation(
             persist_user_display_kind=persist_user_display_kind,
             persist_user_display_metadata=persist_user_display_metadata,
             persist_user_platform_id=persist_user_platform_id,
+            trusted_user_message=trusted_user_message,
+            trusted_user_message_id=trusted_user_message_id,
+            trusted_user_message_internal=trusted_user_message_internal,
             restore_or_build_system_prompt=_restore_or_build_system_prompt,
             install_safe_stdio=_install_safe_stdio,
             sanitize_surrogates=_sanitize_surrogates,

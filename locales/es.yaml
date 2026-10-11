@@ -19,6 +19,38 @@ approval:
   cancelled:       "      ✗ Cancelado"
   blocklist_message: "Este comando está en la lista de bloqueo incondicional y no se puede aprobar."
 
+context_breakdown:
+  category:
+    system_prompt: "System prompt"
+    tool_definitions: "Tool definitions"
+    rules: "Rules"
+    skills: "Skills"
+    mcp: "MCP"
+    subagent_definitions: "Subagent definitions"
+    memory: "Memory"
+    conversation: "Conversation"
+  estimated_usage: "Estimated usage by category"
+  no_data: "  (no data yet — send a message first)"
+  free_space: "Free space"
+  token_unit: "tokens"
+  toolset_row: "  {toolset} {count} tools {tokens} tokens"
+  skill_row: "  {name} index {index_tokens}  SKILL.md {skill_tokens} tokens"
+  not_available: "n/a"
+  more_rows: "  … and {count} more"
+  toolsets_title: "Toolsets by schema cost (largest first)"
+  skills_title: "Skills by cost (index = always-on; SKILL.md = cost when loaded)"
+  window_usage: "Context window: {used} / {total} tokens ({pct}%)"
+  details_hint: "Use /context all for per-skill and per-toolset costs."
+
+cron_delivery:
+  header: "Cronjob Response: {task_name}"
+  job_id: "(job_id: {job_id})"
+  footer: "To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
+
+protected_instruction:
+  description: "Write to protected agent-instruction file(s): {targets}. These files steer future agent behavior; approval is always required (not bypassed by auto-approve)."
+  display: "<write to {targets}>"
+
 gateway:
   approval_expired: "⚠️ La aprobación ha caducado (el agente ya no está esperando). Pida al agente que lo intente de nuevo."
   draining:         "⏳ Esperando a que terminen {count} agente(s) activo(s) antes de reiniciar..."

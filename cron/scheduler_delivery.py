@@ -20,6 +20,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
+from agent.i18n import t as i18n_t
 from hermes_cli._subprocess_compat import windows_hide_flags
 
 # Log-record parity with the origin module.
@@ -1630,12 +1631,11 @@ def _deliver_result(
     if wrap_response:
         task_name = job.get("name", job["id"])
         delivery_content = (
-            f"Cronjob Response: {task_name}\n"
-            f"(job_id: {job.get('id', '')})\n"
+            f"{i18n_t('cron_delivery.header', task_name=task_name)}\n"
+            f"{i18n_t('cron_delivery.job_id', job_id=job.get('id', ''))}\n"
             f"-------------\n\n"
             f"{content}\n\n"
-            "To stop or manage this job, send me a new message "
-            f"(e.g. \"stop reminder {task_name}\")."
+            f"{i18n_t('cron_delivery.footer', task_name=task_name)}"
         )
     else:
         delivery_content = content

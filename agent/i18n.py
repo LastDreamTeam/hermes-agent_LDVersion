@@ -165,4 +165,24 @@ def t(key: str, lang: str | None = None, **format_kwargs: Any) -> str:
         return value
 
 
-__all__ = ["SUPPORTED_LANGUAGES", "DEFAULT_LANGUAGE", "t", "get_language", "reset_language_cache"]
+def zh_text(english: str, chinese: str, **format_kwargs: Any) -> str:
+    """Return a compact Simplified-Chinese overlay string when ``display.language`` is ``zh``.
+
+    This is intentionally a two-string helper rather than a second catalogue system.  It is used
+    only by legacy surfaces whose English text is still assembled dynamically and therefore cannot
+    be represented faithfully by one static catalogue key.  Every non-Simplified-Chinese locale
+    keeps the upstream English text unchanged.
+    """
+    value = chinese if get_language() == "zh" else english
+    if not format_kwargs:
+        return value
+    try:
+        return value.format(**format_kwargs)
+    except (KeyError, IndexError, ValueError) as exc:
+        logger.warning("i18n inline format failed for lang=%r kwargs=%r: %s", get_language(), format_kwargs, exc)
+        return value
+
+
+__all__ = [
+    "SUPPORTED_LANGUAGES", "DEFAULT_LANGUAGE", "t", "zh_text", "get_language", "reset_language_cache",
+]

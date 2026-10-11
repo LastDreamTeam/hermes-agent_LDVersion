@@ -3,7 +3,9 @@ events, REST (``api.sgroup.qq.com``) for outbound messages and media uploads.
 
 config.yaml ``platforms.qq.extra``: app_id / client_secret (or QQ_APP_ID /
 QQ_CLIENT_SECRET), markdown_support, dm_policy + allow_from, group_policy +
-group_allow_from (open | allowlist | disabled | pairing), and optional ``stt``
+group_allow_from (open | allowlist | disabled | pairing), optional
+``group_member_allow_from``, owner/admin temporary access controls and optional
+per-principal toolsets, and optional ``stt``
 {provider, baseUrl, apiKey, model} (or QQ_STT_* env vars). Voice transcription
 tries QQ's free ``asr_refer_text`` first, then the configured STT provider.
 """
@@ -16,6 +18,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +48,12 @@ from gateway.platforms.helpers import strip_markdown
 from gateway.platforms.media_cache import ext_for_mime
 
 logger = logging.getLogger(__name__)
+
+_QQ_MENU_STATE_LOCK = threading.RLock()
+_QQ_MENU_SWITCH_IDS = ("deep_reasoning", "autonomy", "dispatch_mode")
+_QQ_MENU_SWITCH_NAMES = {
+    "深度推理": "deep_reasoning", "自主进化": "autonomy", "派发模式": "dispatch_mode",
+}
 
 
 class QQCloseError(Exception):
@@ -147,6 +156,33 @@ class QQAdapter(BasePlatformAdapter):
         self._allow_from = _coerce_list(extra.get("allow_from") or extra.get("allowFrom"))
         self._group_policy = str(extra.get("group_policy", "pairing")).strip().lower()
         self._group_allow_from = _coerce_list(extra.get("group_allow_from") or extra.get("groupAllowFrom"))
+        self._group_member_allow_from = _coerce_list(
+            extra.get("group_member_allow_from") or extra.get("groupMemberAllowFrom"))
+        self._group_member_policy = str(extra.get("group_member_policy", "")).strip().lower()
+        self._group_owners = _coerce_list(extra.get("group_owners") or extra.get("groupOwners"))
+        self._group_super_owners = _coerce_list(
+            extra.get("group_super_owners") or extra.get("groupSuperOwners"))
+        self._group_admins = _coerce_list(extra.get("group_admins") or extra.get("groupAdmins"))
+        self._public_toolsets = _coerce_list(extra.get("public_toolsets") or extra.get("publicToolsets"))
+        self._owner_toolsets = _coerce_list(extra.get("owner_toolsets") or extra.get("ownerToolsets"))
+        self._super_owner_toolsets = _coerce_list(
+            extra.get("super_owner_toolsets") or extra.get("superOwnerToolsets"))
+        labels = extra.get("principal_labels") or extra.get("principalLabels") or {}
+        self._principal_labels = {
+            str(member_id).strip().casefold(): str(label).strip()
+            for member_id, label in (labels.items() if isinstance(labels, dict) else [])
+            if str(member_id).strip() and str(label).strip()
+        }
+        try:
+            self._temporary_access_minutes = max(1, min(1440, int(extra.get("temporary_access_minutes", 30))))
+        except (TypeError, ValueError):
+            self._temporary_access_minutes = 30
+        self._temporary_group_access: Dict[str, Dict[str, float]] = {}
+        self._runtime_group_admins: Dict[str, List[str]] = {}
+        self._known_group_members: Dict[str, Dict[str, str]] = {}
+        self._recent_blocked_members: Dict[str, List[Tuple[float, str, str]]] = {}
+        if self._member_acl_enabled():
+            self._load_temporary_group_access()
 
         self._session: Optional[aiohttp.ClientSession] = None
         self._ws: Optional[aiohttp.ClientWebSocketResponse] = None
@@ -666,7 +702,9 @@ class QQAdapter(BasePlatformAdapter):
 
         chat_type = parsed.get("chat_type", "")
         chat_id = parsed.get("chat_id", "")
-        if chat_type == "c2c":
+        # Gateway session keys use ``dm`` while QQ interaction payloads call the
+        # same one-to-one scene ``c2c``.  Treat both spellings identically.
+        if chat_type in {"c2c", "dm"}:
             return bool(chat_id) and operator == chat_id
         if chat_type in {"group", "guild"}:
             event_chat = str(event.group_openid or event.guild_id or "").strip()
@@ -754,16 +792,31 @@ class QQAdapter(BasePlatformAdapter):
 
         await self._ingest(
             d, msg_id, content, attachments_raw, timestamp, verbose=True,
-            chat_id=user_openid, qq_chat_type="c2c", user_id=user_openid, chat_type="dm")
+            chat_id=user_openid, qq_chat_type="c2c", user_id=user_openid,
+            user_name=self._source_user_name(user_openid), chat_type="dm",
+            role_authorized=self._is_group_super_owner(user_openid))
 
     async def _handle_group_message(self, d, msg_id, content, author, timestamp) -> None:
         group_openid = str(d.get("group_openid", ""))
         member = str(author.get("member_openid", ""))
         if not group_openid or not self._is_group_allowed(group_openid, member):
             return
+        clean_content = self._strip_at_mention(content)
+        self._remember_group_member(group_openid, member, author, d)
+        if self._member_acl_enabled():
+            if await self._handle_group_member_command(group_openid, member, clean_content, d, msg_id):
+                return
+            if not self._is_group_member_allowed(group_openid, member):
+                self._remember_blocked_member(group_openid, member, author)
+                return
+            # Temporary guests may chat, but may not invoke Hermes operator slash commands.
+            if clean_content.lstrip().startswith("/") and not self._is_group_operator(group_openid, member):
+                return
         await self._ingest(
-            d, msg_id, self._strip_at_mention(content), d.get("attachments"), timestamp,
-            chat_id=group_openid, qq_chat_type="group", user_id=member, chat_type="group")
+            d, msg_id, clean_content, d.get("attachments"), timestamp,
+            chat_id=group_openid, qq_chat_type="group", user_id=member,
+            user_name=self._source_user_name(member), chat_type="group",
+            role_authorized=self._is_group_super_owner(member))
 
     async def _handle_guild_message(self, d, msg_id, content, author, timestamp) -> None:
         channel_id = str(d.get("channel_id", ""))
@@ -810,11 +863,115 @@ class QQAdapter(BasePlatformAdapter):
         """Append *block* to *text* after a blank line (or return block alone if text is blank)."""
         return (text + "\n\n" + block).strip() if text.strip() else block
 
+    @staticmethod
+    def _menu_mode_state_path() -> Path:
+        """Dedicated, non-config state for QQ menu switches.
+
+        The file deliberately lives outside ``config.yaml`` so a UI toggle cannot rewrite the
+        production configuration or interfere with the trusted release/hash pipeline.
+        """
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "qqbot_menu_modes.json"
+
+    def _menu_mode_lane(self, qq_chat_type: str, chat_id: str) -> str:
+        return f"{self._app_id}:{qq_chat_type}:{chat_id}"
+
+    @classmethod
+    def _empty_menu_modes(cls) -> Dict[str, bool]:
+        return {name: False for name in _QQ_MENU_SWITCH_IDS}
+
+    @classmethod
+    def _menu_ext_markers(cls, raw_ext: Any) -> set[str]:
+        """Return enabled switch IDs from QQ's ``ext`` string/dict.
+
+        QQ documents active switches as ``switch_id=1``.  Accepting dicts as well keeps the
+        adapter compatible with SDK-normalized payloads without broadening the accepted IDs.
+        """
+        markers: set[str] = set()
+        if isinstance(raw_ext, dict):
+            for key, value in raw_ext.items():
+                if str(key) in _QQ_MENU_SWITCH_IDS and str(value).strip().lower() in {"1", "true", "on"}:
+                    markers.add(str(key))
+            return markers
+        if not isinstance(raw_ext, str):
+            return markers
+        for match in re.finditer(r"(?:^|[&;,\s])([A-Za-z0-9_-]{1,64})=([01])(?=$|[&;,\s])", raw_ext):
+            if match.group(1) in _QQ_MENU_SWITCH_IDS and match.group(2) == "1":
+                markers.add(match.group(1))
+        return markers
+
+    def _read_menu_mode_state(self) -> Dict[str, Any]:
+        path = self._menu_mode_state_path()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) and raw.get("version") == 1 else {"version": 1, "lanes": {}}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {"version": 1, "lanes": {}}
+
+    def _menu_modes_for_chat(self, qq_chat_type: str, chat_id: str) -> Dict[str, bool]:
+        with _QQ_MENU_STATE_LOCK:
+            raw = self._read_menu_mode_state()
+            lane = (raw.get("lanes") or {}).get(self._menu_mode_lane(qq_chat_type, chat_id)) or {}
+            return {name: bool(lane.get(name, False)) for name in _QQ_MENU_SWITCH_IDS}
+
+    def _write_menu_modes_for_chat(
+        self, qq_chat_type: str, chat_id: str, modes: Dict[str, bool], *, source_message_id: str,
+    ) -> None:
+        path = self._menu_mode_state_path()
+        with _QQ_MENU_STATE_LOCK:
+            raw = self._read_menu_mode_state()
+            lanes = raw.setdefault("lanes", {})
+            lane_key = self._menu_mode_lane(qq_chat_type, chat_id)
+            normalized = {name: bool(modes.get(name, False)) for name in _QQ_MENU_SWITCH_IDS}
+            lanes[lane_key] = {
+                **normalized, "updated_at": datetime.now(timezone.utc).isoformat(),
+                "source_message_id": str(source_message_id or ""),
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+            tmp.write_text(json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            tmp.replace(path)
+
+    def _resolve_menu_modes(
+        self, d: Dict[str, Any], content: str, qq_chat_type: str, chat_id: str, msg_id: str,
+    ) -> Tuple[Dict[str, bool], bool]:
+        """Resolve persisted modes and whether this payload is the switch-toggle event itself."""
+        cleaned = (content or "").strip()
+        raw_ext_present = "ext" in d
+        markers = self._menu_ext_markers(d.get("ext"))
+        # QQ uses an empty/label-only message for a menu toggle.  Regular chat may also carry ext,
+        # so it is not swallowed unless it matches that narrow shape.
+        switch_event = raw_ext_present and (not cleaned or cleaned in _QQ_MENU_SWITCH_NAMES or cleaned in _QQ_MENU_SWITCH_IDS)
+        if markers or switch_event:
+            modes = {name: name in markers for name in _QQ_MENU_SWITCH_IDS}
+            self._write_menu_modes_for_chat(qq_chat_type, chat_id, modes, source_message_id=msg_id)
+            logger.info("[%s] QQ menu modes updated: lane=%s enabled=%s", self._log_tag,
+                        self._menu_mode_lane(qq_chat_type, chat_id), sorted(k for k, v in modes.items() if v))
+            return modes, switch_event
+        return self._menu_modes_for_chat(qq_chat_type, chat_id), False
+
+    @staticmethod
+    def _menu_channel_prompt(modes: Dict[str, bool]) -> Optional[str]:
+        notes: List[str] = []
+        if modes.get("dispatch_mode"):
+            notes.append(
+                "【QQ 派发模式已开启】对预计超过 1—3 分钟、需要网络检索或可并行的任务，优先通过已有 A2A "
+                "队友异步派发；你负责拆解、跟踪、验收和向主人汇总。不得因此扩大权限、绕过审批或派发高风险外部操作。"
+            )
+        if modes.get("autonomy"):
+            notes.append(
+                "【自主进化备用开关已开启】当前仅记录持久状态，15 分钟心跳不调用模型；不得把此开关解释为新增写入、付费或外部操作授权。"
+            )
+        return "\n".join(notes) or None
+
     async def _ingest(
         self, d: Dict[str, Any], msg_id: str, content: str, attachments: Any, timestamp: str, *,
         chat_id: str, qq_chat_type: str, verbose: bool = False, **source_kwargs: Any) -> None:
         """Shared inbound tail: fold attachment transcripts/file info and quoted context
         into the text, drop empty events, remember the QQ chat kind and dispatch."""
+        menu_modes, menu_switch_event = self._resolve_menu_modes(d, content, qq_chat_type, chat_id, msg_id)
         att = await self._process_attachments(attachments)
         text = content
         voice_transcripts = att["voice_transcripts"]
@@ -831,6 +988,9 @@ class QQAdapter(BasePlatformAdapter):
         if quoted["image_urls"]:
             image_urls = image_urls + quoted["image_urls"]
             image_media_types = image_media_types + quoted["image_media_types"]
+        if menu_switch_event and not attachments and not image_urls:
+            # The switch state has already been persisted.  Do not spend a model call echoing a UI toggle.
+            return
         if not text.strip() and not image_urls:
             return
 
@@ -840,6 +1000,9 @@ class QQAdapter(BasePlatformAdapter):
             message_type=self._detect_message_type(image_urls, image_media_types), raw_message=d,
             message_id=msg_id, media_urls=image_urls, media_types=image_media_types,
             timestamp=self._parse_qq_timestamp(timestamp),
+            raw_author_text=content,
+            metadata={"qq_menu_modes": menu_modes, "qq_menu_switch_event": menu_switch_event},
+            channel_prompt=self._menu_channel_prompt(menu_modes),
         )
         await self.handle_message(event)
 
@@ -1667,10 +1830,246 @@ class QQAdapter(BasePlatformAdapter):
             return True
         return self._is_dm_allowed(principal)
 
+    def _member_acl_enabled(self) -> bool:
+        return self._group_member_policy in {"owner_admin_temporary", "owner-admin-temporary", "restricted"}
+
+    @staticmethod
+    def _member_alias(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().lstrip("@")).casefold()
+
+    @staticmethod
+    def _masked_member_id(member_id: str) -> str:
+        value = str(member_id or "")
+        return value if len(value) <= 10 else f"{value[:5]}…{value[-5:]}"
+
+    @staticmethod
+    def _member_access_state_path() -> Path:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "qqbot_group_member_access.json"
+
+    def _load_temporary_group_access(self) -> None:
+        """Load unexpired grants and command-managed admins; malformed state fails closed."""
+        try:
+            raw = json.loads(self._member_access_state_path().read_text(encoding="utf-8"))
+        except (FileNotFoundError, OSError, ValueError, TypeError):
+            return
+        now = time.time()
+        grants = raw.get("temporary_grants") if isinstance(raw, dict) else {}
+        if isinstance(grants, dict):
+            for group_id, members in grants.items():
+                if not isinstance(members, dict):
+                    continue
+                active = {}
+                for member_id, expires_at in members.items():
+                    try:
+                        expiry = float(expires_at)
+                    except (TypeError, ValueError):
+                        continue
+                    if expiry > now:
+                        active[str(member_id)] = expiry
+                if active:
+                    self._temporary_group_access[str(group_id)] = active
+        runtime_admins = raw.get("group_admins") if isinstance(raw, dict) else {}
+        self._runtime_group_admins = {
+            str(group_id): _coerce_list(members)
+            for group_id, members in (runtime_admins.items() if isinstance(runtime_admins, dict) else [])
+        }
+
+    def _save_group_member_access(self) -> None:
+        path = self._member_access_state_path()
+        now = time.time()
+        grants = {
+            group_id: {member_id: expiry for member_id, expiry in members.items() if expiry > now}
+            for group_id, members in self._temporary_group_access.items()
+        }
+        payload = {"version": 1, "temporary_grants": {k: v for k, v in grants.items() if v},
+                   "group_admins": getattr(self, "_runtime_group_admins", {})}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                os.chmod(tmp, 0o600)
+            tmp.replace(path)
+        except OSError as exc:
+            logger.warning("[%s] Could not persist QQ group member access: %s", self._log_tag, exc)
+
+    def _remember_group_member(self, group_id: str, member_id: str, author: dict, event: dict) -> None:
+        if not group_id or not member_id:
+            return
+        aliases = self._known_group_members.setdefault(group_id, {})
+        aliases[self._member_alias(member_id)] = member_id
+        member = event.get("member") if isinstance(event.get("member"), dict) else {}
+        for source in (author, member):
+            for key in ("username", "nick", "nickname", "name"):
+                if alias := self._member_alias(source.get(key)):
+                    aliases[alias] = member_id
+
+    def _remember_blocked_member(self, group_id: str, member_id: str, author: dict) -> None:
+        label = next((str(author.get(k) or "").strip() for k in ("username", "nick", "nickname", "name")
+                      if str(author.get(k) or "").strip()), self._masked_member_id(member_id))
+        now = time.time()
+        recent = [(ts, mid, name) for ts, mid, name in self._recent_blocked_members.get(group_id, [])
+                  if now - ts <= 300 and mid != member_id]
+        recent.append((now, member_id, label))
+        self._recent_blocked_members[group_id] = recent[-20:]
+
+    def _is_group_super_owner(self, member_id: str) -> bool:
+        return self._entry_matches(self._group_super_owners, member_id)
+
+    def _is_group_owner(self, member_id: str) -> bool:
+        return self._entry_matches(self._group_owners, member_id)
+
+    def _is_group_operator(self, group_id: str, member_id: str) -> bool:
+        runtime_admins = getattr(self, "_runtime_group_admins", {}).get(group_id, [])
+        return (self._is_group_owner(member_id)
+                or self._entry_matches(self._group_admins, member_id)
+                or self._entry_matches(runtime_admins, member_id))
+
+    def _source_user_name(self, member_id: str) -> Optional[str]:
+        return self._principal_labels.get(str(member_id or "").strip().casefold())
+
+    def toolsets_for_source(self, source) -> Optional[List[str]]:
+        """Apply a hard per-principal capability boundary before model tool resolution."""
+        member_id = str(getattr(source, "user_id", "") or "").strip()
+        if self._is_group_super_owner(member_id) and self._super_owner_toolsets:
+            return list(self._super_owner_toolsets)
+        if self._is_group_owner(member_id) and self._owner_toolsets:
+            return list(self._owner_toolsets)
+        return list(self._public_toolsets) if self._public_toolsets else None
+
+    def _is_group_member_allowed(self, group_id: str, member_id: str) -> bool:
+        if self._is_group_operator(group_id, member_id):
+            return True
+        expiry = self._temporary_group_access.get(group_id, {}).get(member_id, 0)
+        if expiry > time.time():
+            return True
+        if expiry:
+            self._temporary_group_access.get(group_id, {}).pop(member_id, None)
+            self._save_group_member_access()
+        return False
+
+    @staticmethod
+    def _structured_mention_member_ids(event: dict) -> List[str]:
+        """Best-effort support for QQ payload variants that attach structured mention objects."""
+        found: List[str] = []
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                for key in ("member_openid", "user_openid"):
+                    candidate = str(value.get(key) or "").strip()
+                    if candidate and candidate not in found:
+                        found.append(candidate)
+                for child in value.values():
+                    walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    walk(child)
+
+        for key in ("mentions", "mention", "at_users", "at_members"):
+            walk(event.get(key))
+        return found
+
+    def _resolve_group_command_target(
+        self, group_id: str, sender_id: str, target_spec: str, event: dict,
+    ) -> Tuple[str, str]:
+        spec = str(target_spec or "").strip()
+        if self._member_alias(spec) in {"上一个", "最近一个", "last"}:
+            now = time.time()
+            recent = [item for item in self._recent_blocked_members.get(group_id, []) if now - item[0] <= 300]
+            return (recent[-1][1], recent[-1][2]) if recent else ("", "")
+
+        aliases = self._known_group_members.get(group_id, {})
+        alias = self._member_alias(spec)
+        if alias in aliases:
+            return aliases[alias], spec.lstrip("@")
+        at_match = re.search(r"@([^\s]+)", spec)
+        if at_match and self._member_alias(at_match.group(1)) in aliases:
+            name = at_match.group(1)
+            return aliases[self._member_alias(name)], name
+        direct = re.search(r"\b[A-Fa-f0-9]{16,128}\b", spec)
+        if direct:
+            return direct.group(0), self._masked_member_id(direct.group(0))
+        structured = [mid for mid in self._structured_mention_member_ids(event) if mid != sender_id]
+        if structured:
+            return structured[0], self._masked_member_id(structured[0])
+        return "", ""
+
+    async def _send_group_acl_reply(self, group_id: str, msg_id: str, text: str) -> None:
+        self._chat_type_map[group_id] = "group"
+        self._last_msg_id[group_id] = msg_id
+        result = await self._send_group_text(group_id, text, reply_to=msg_id)
+        if not result.success:
+            logger.warning("[%s] Could not send QQ group ACL command reply: %s", self._log_tag, result.error)
+
+    async def _handle_group_member_command(
+        self, group_id: str, sender_id: str, content: str, event: dict, msg_id: str,
+    ) -> bool:
+        """Handle owner/admin member-ACL commands before the message reaches the model."""
+        command = content.strip()
+        lowered = command.casefold()
+        status_commands = {"/qq权限", "/qq访问", "/access"}
+        prefixes = {
+            "/允许回复": "grant", "/grant": "grant", "/取消回复": "revoke", "/revoke": "revoke",
+            "/设管理员": "admin_add", "/添加管理员": "admin_add", "/移除管理员": "admin_remove",
+        }
+        action, prefix = next(
+            ((value, key) for key, value in prefixes.items() if lowered.startswith(key.casefold())), ("", ""))
+        if lowered not in status_commands and not action:
+            return False
+        if not self._is_group_operator(group_id, sender_id):
+            return True
+        if lowered in status_commands:
+            active = sum(expiry > time.time() for expiry in self._temporary_group_access.get(group_id, {}).values())
+            admins = len(getattr(self, "_runtime_group_admins", {}).get(group_id, [])) + len(self._group_admins)
+            await self._send_group_acl_reply(
+                group_id, msg_id, f"本群 QQ 权限：主人已启用，管理员 {admins} 人，临时授权 {active} 人。"
+                f"\n命令：/允许回复 @某人（默认{self._temporary_access_minutes}分钟）、/取消回复 @某人、/设管理员 @某人。")
+            return True
+        if action.startswith("admin_") and not self._is_group_owner(sender_id):
+            await self._send_group_acl_reply(group_id, msg_id, "只有主人可以增删 QQBot 管理员。")
+            return True
+
+        remainder = command[len(prefix):].strip()
+        minutes = self._temporary_access_minutes
+        if action == "grant" and (duration := re.search(r"(?:\s+|^)(\d{1,4})\s*(?:分钟|min|m)\s*$", remainder, re.I)):
+            minutes = max(1, min(1440, int(duration.group(1))))
+            remainder = remainder[:duration.start()].strip()
+        target_id, label = self._resolve_group_command_target(group_id, sender_id, remainder, event)
+        if not target_id:
+            await self._send_group_acl_reply(
+                group_id, msg_id, "没有识别到目标成员。请让对方先在本群 @我 一次，再用 /允许回复 @昵称；"
+                "若 QQ 未下发昵称，可用 /允许回复 上一个。")
+            return True
+
+        if action == "grant":
+            self._temporary_group_access.setdefault(group_id, {})[target_id] = time.time() + minutes * 60
+            self._save_group_member_access()
+            await self._send_group_acl_reply(group_id, msg_id, f"已允许 {label} 与我对话 {minutes} 分钟。")
+        elif action == "revoke":
+            self._temporary_group_access.get(group_id, {}).pop(target_id, None)
+            self._save_group_member_access()
+            await self._send_group_acl_reply(group_id, msg_id, f"已取消 {label} 的临时回复权限。")
+        else:
+            admins = getattr(self, "_runtime_group_admins", {}).setdefault(group_id, [])
+            if action == "admin_add" and not self._entry_matches(admins, target_id):
+                admins.append(target_id)
+            elif action == "admin_remove":
+                admins[:] = [item for item in admins if str(item).strip().lower() != target_id.lower()]
+            self._save_group_member_access()
+            verb = "设为" if action == "admin_add" else "移出"
+            await self._send_group_acl_reply(group_id, msg_id, f"已将 {label} {verb} QQBot 管理员。")
+        return True
+
     def _is_group_allowed(self, group_id: str, user_id: str) -> bool:
         if self._group_policy == "allowlist":
-            return self._entry_matches(self._group_allow_from, group_id)
-        return self._group_policy == "open"
+            group_allowed = self._entry_matches(self._group_allow_from, group_id)
+        else:
+            group_allowed = self._group_policy == "open"
+        if not group_allowed:
+            return False
+        return not self._group_member_allow_from or self._entry_matches(
+            self._group_member_allow_from, user_id)
 
     @staticmethod
     def _entry_matches(entries: List[str], target: str) -> bool:

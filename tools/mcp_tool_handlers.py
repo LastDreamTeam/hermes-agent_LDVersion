@@ -1,5 +1,6 @@
 """Registry-facing sync handlers for MCP tools and utility tools (resources/prompts), plus the per-call recovery
-ladder: trust gating, circuit breaker, auth (401) refresh, session-expired reconnect and dead-stdio respawn retry."""
+ladder: trust gating, circuit breaker, auth (401) refresh, session-expired reconnect and dead-stdio respawn. Recovery
+replay is suppressed when a native tool explicitly declares ``annotations.idempotentHint=false``."""
 
 import logging
 import asyncio
@@ -8,6 +9,7 @@ import inspect
 import json
 import time
 from contextlib import asynccontextmanager
+from functools import partial
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from tools.registry import tool_error
@@ -33,6 +35,23 @@ _STDIO_NO_RESPAWN_MSG = (
 _STDIO_DIED_AGAIN_MSG = (
     "MCP server '{s}' respawned its stdio subprocess and it exited again immediately. The server is not starting "
     "cleanly — do NOT retry this tool; ask the user to check the server's command and its stderr log.")
+
+
+def _non_idempotent_uncertain_result(server_name: str, tool_name: str, recovery: str, **extra) -> str:
+    """Fail closed after recovering a transport used by a non-idempotent call.
+
+    The first RPC may have reached the remote service even though its response
+    was lost.  Retrying could duplicate an order, payment, message, or other
+    side effect, so the caller must query authoritative state first.
+    """
+    return tool_error(
+        f"MCP tool '{tool_name}' on server '{server_name}' declares annotations.idempotentHint=false. "
+        f"Its call encountered {recovery} while dispatching or awaiting a response, so the external outcome "
+        "may be uncertain. Hermes "
+        "recovered or "
+        "requested recovery of the connection but deliberately did NOT automatically replay the tool. Query "
+        "authoritative status with a read-only/query tool before deciding whether a new attempt is safe.",
+        outcome_uncertain=True, automatic_replay=False, server=server_name, tool=tool_name, **extra)
 
 
 def _trust_gate_check(server_name: str, tool_name: str) -> Optional[str]:
@@ -137,10 +156,13 @@ def _retry_once(server_name: str, retry_call, op_description: str, what: str):
     return result
 
 
-def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
-    """OAuth recovery + one retry; None when *exc* is not an auth error. ``handle_401`` decides
-    viability; if viable, signal a reconnect (fresh credentials), wait ready, retry once. Any
-    failure returns the structured ``needs_reauth`` error so the model stops refreshing."""
+def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str, *,
+                                 allow_replay: bool = True, tool_name: Optional[str] = None):
+    """OAuth recovery + at most one retry; None when *exc* is not an auth error.
+
+    ``handle_401`` decides viability.  An explicit non-idempotent caller still
+    refreshes/reconnects but returns an uncertain result without replaying.
+    """
     if not _is_auth_error(exc):
         return None
     from tools.mcp_oauth_manager import get_manager
@@ -151,20 +173,36 @@ def _handle_auth_error_and_retry(server_name: str, exc: BaseException, retry_cal
         recovered = False
     if recovered:
         srv = _lookup_reconnectable_server(server_name)
+        reconnected = False
         # Recovery + reconnect is independent evidence of viability: close the breaker here, not only on
         # retry success (else a failing retry pins it open forever).
         if srv is not None and _loop._signal_reconnect_and_wait(
                 server_name, srv, op_description=f"{op_description} after OAuth recovery", timeout=15):
+            reconnected = True
             _core._reset_server_error(server_name)
+        if not allow_replay:
+            if not reconnected:
+                _core._bump_server_error(server_name)
+            return _non_idempotent_uncertain_result(
+                server_name, tool_name or op_description, "authentication/transport recovery",
+                connection_recovered=reconnected)
         result = _retry_once(server_name, retry_call, op_description, "auth recovery")
         if result is not None:
             return result
+    if not allow_replay:
+        _core._bump_server_error(server_name)
+        return _non_idempotent_uncertain_result(
+            server_name, tool_name or op_description, "authentication recovery",
+            needs_reauth=True)
     return _strike(server_name, _NEEDS_REAUTH_MSG.format(s=server_name), needs_reauth=True, server=server_name)
 
 
-def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str):
-    """Transport reconnect + one retry on session expiry; None to fall through. Skips
-    ``handle_401``: the token is valid, only the server-side session is stale.
+def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retry_call, op_description: str, *,
+                                      allow_replay: bool = True, tool_name: Optional[str] = None):
+    """Transport reconnect + at most one retry on session expiry; None to fall through.
+
+    Non-idempotent callers reconnect but never replay.  This skips ``handle_401``:
+    the token is valid, only the server-side session is stale.
 
     Unlike :func:`_handle_auth_error_and_retry`, this does **not** call the OAuth manager's ``handle_401`` —
     the access token is still valid, only the server-side session state is stale. Setting
@@ -172,26 +210,54 @@ def _handle_session_expired_and_retry(server_name: str, exc: BaseException, retr
     ``streamablehttp_client`` + ``ClientSession`` and rebuild them, reusing the existing OAuth provider
     instance. See #13383.
     """
-    srv = _lookup_reconnectable_server(server_name, require_loop=True) if _is_session_expired_error(exc) else None
+    if not _is_session_expired_error(exc):
+        return None
+    srv = _lookup_reconnectable_server(server_name, require_loop=True)
     if srv is None:
+        if not allow_replay:
+            _core._bump_server_error(server_name)
+            return _non_idempotent_uncertain_result(
+                server_name, tool_name or op_description, "session/transport failure",
+                connection_recovered=False)
         return None
     logger.info("MCP server '%s': %s failed with session-expired error (%s); signalling transport reconnect "
                 "and retrying once.", server_name, op_description, exc)
     if not _loop._signal_reconnect_and_wait(server_name, srv, op_description=op_description, timeout=15):
         logger.warning("MCP server '%s': reconnect did not ready within 15s after session-expired error; "
                        "falling through to error response.", server_name)
+        if not allow_replay:
+            _core._bump_server_error(server_name)
+            return _non_idempotent_uncertain_result(
+                server_name, tool_name or op_description, "session/transport recovery",
+                connection_recovered=False)
         return None
+    if not allow_replay:
+        _core._reset_server_error(server_name)
+        return _non_idempotent_uncertain_result(
+            server_name, tool_name or op_description, "session/transport recovery",
+            connection_recovered=True)
     return _retry_once(server_name, retry_call, op_description, "session reconnect")
 
 
 class _StdioChildExited(RuntimeError):
-    """Stdio subprocess gone when (or while) a call ran. Deliberately NOT a TimeoutError."""
+    """Stdio subprocess gone before or during a call.
+
+    ``dispatched=False`` is reserved for the pre-call liveness check: no RPC
+    coroutine was created, so retrying after a respawn cannot duplicate a
+    side effect. Every other construction defaults to the conservative
+    ``True`` state.
+    """
+
+    def __init__(self, *args, dispatched: bool = True):
+        super().__init__(*args)
+        self.dispatched = bool(dispatched)
 
 
-def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry_call, op_description: str):
-    """Respawn a dead stdio child and retry once; None if not our error. Never spawns itself: it
+def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry_call, op_description: str, *,
+                                         allow_replay: bool = True, tool_name: Optional[str] = None):
+    """Respawn a dead stdio child and retry at most once; None if not our error. Never spawns itself: it
     sets ``_reconnect_event`` and waits, so spawn frequency stays governed by ``run()``'s
-    rapid-drop budget. Single-shot: a child that dies again reports and stops.
+    rapid-drop budget. Non-idempotent callers stop after respawn without replay.
 
     Why retrying here cannot hot-cycle respawns: this function never spawns anything. It sets
     ``_reconnect_event`` (one signal, same as before) and waits for the server task to publish a fresh
@@ -200,6 +266,10 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
     """
     if not isinstance(exc, _StdioChildExited):
         return None
+    # The pre-call PID check proves that no RPC was dispatched. A single
+    # attempt on the respawned child is therefore safe even for a tool whose
+    # remote operation is non-idempotent. Mid-call death remains ambiguous.
+    replay_is_safe = allow_replay or not exc.dispatched
     reconnected = False
     srv = _lookup_reconnectable_server(server_name)
     if srv is not None:
@@ -211,19 +281,150 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
         else:  # No MCP loop to wait on (non-async adapters, tests): still request the respawn.
             _loop._signal_reconnect(srv)
     if not reconnected:
+        if not replay_is_safe:
+            _core._bump_server_error(server_name)
+            return _non_idempotent_uncertain_result(
+                server_name, tool_name or op_description, "stdio transport recovery",
+                connection_recovered=False)
         return _strike(server_name, _STDIO_NO_RESPAWN_MSG.format(s=server_name, t=_core._STDIO_RESPAWN_WAIT_SEC))
+    if not replay_is_safe:
+        _core._reset_server_error(server_name)
+        return _non_idempotent_uncertain_result(
+            server_name, tool_name or op_description, "stdio transport recovery",
+            connection_recovered=True)
     try:
         return _record_call_outcome(server_name, retry_call())
     except _StdioChildExited as retry_exc:
+        if not allow_replay and retry_exc.dispatched:
+            _core._bump_server_error(server_name)
+            return _non_idempotent_uncertain_result(
+                server_name, tool_name or op_description,
+                "stdio transport failure after a safe pre-dispatch respawn",
+                connection_recovered=False)
         # Died again right after respawn: broken server; run()'s budget takes it to the park.
         logger.warning("MCP server '%s': %s stdio subprocess exited again right after respawn (%s); not retrying "
                        "further.", server_name, op_description, retry_exc)
         return _strike(server_name, _STDIO_DIED_AGAIN_MSG.format(s=server_name))
     except Exception as retry_exc:
+        if not allow_replay:
+            _core._bump_server_error(server_name)
+            return _non_idempotent_uncertain_result(
+                server_name, tool_name or op_description,
+                "a failure after a safe pre-dispatch stdio respawn",
+                connection_recovered=False)
         logger.warning("MCP %s/%s retry after stdio respawn failed: %s", server_name, op_description, retry_exc)
         return _strike(server_name, _sanitize_error(
             f"MCP call failed after respawning the stdio subprocess for '{server_name}': "
             f"{type(retry_exc).__name__}: {_exc_str(retry_exc)}"))
+
+
+def _iter_exception_tree(exc: BaseException):
+    """Yield a bounded, cycle-safe exception graph."""
+    stack = [exc]
+    seen: set[int] = set()
+    for _ in range(256):
+        if not stack:
+            break
+        current = stack.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        nested = getattr(current, "exceptions", ())
+        if isinstance(nested, (list, tuple)):
+            stack.extend(nested)
+        stack.extend(c for c in (
+            getattr(current, "__cause__", None), getattr(current, "__context__", None))
+                     if isinstance(c, BaseException))
+
+
+def _http_transport_error_types() -> tuple:
+    """Transport exception bases from both the SDK HTTP stack and Hermes' httpx.
+
+    MCP 2.x may use ``httpx2`` while the rest of Hermes uses ``httpx``. Neither
+    library's timeout/network exceptions inherit the built-in TimeoutError or
+    ConnectionError, and their messages are frequently empty.
+    """
+    modules = []
+    try:
+        modules.append(_core.sdk_httpx())
+    except Exception:
+        pass
+    try:
+        import httpx
+        modules.append(httpx)
+    except ImportError:
+        pass
+    bases = []
+    for module in modules:
+        base = getattr(module, "TransportError", None) if module is not None else None
+        if isinstance(base, type) and base not in bases:
+            bases.append(base)
+    return tuple(bases)
+
+
+def _is_reconnect_teardown_failure(exc: BaseException) -> bool:
+    """True when the lifecycle already cancelled this RPC to rebuild the transport."""
+    return any("aborted by a reconnect teardown" in str(current).lower()
+               for current in _iter_exception_tree(exc))
+
+
+def _is_ambiguous_transport_failure(exc: BaseException) -> bool:
+    """Narrow fallback for transport failures not covered by auth/session handlers.
+
+    In particular, some Streamable HTTP implementations answer a dispatched
+    JSON-RPC request with ``text/plain``; MCP SDK versions surface that as a
+    generic runtime error rather than a typed transport error.  A timeout or
+    connection error is equally ambiguous for a side-effecting operation.
+    """
+    http_transport_errors = _http_transport_error_types()
+    for current in _iter_exception_tree(exc):
+        if isinstance(current, (ConnectionError, TimeoutError) + http_transport_errors):
+            return True
+        status_code = getattr(getattr(current, "response", None), "status_code", None)
+        if isinstance(status_code, int) and 500 <= status_code <= 599:
+            return True
+        message = str(current).lower()
+        unexpected_plaintext = (
+            "text/plain" in message
+            and any(marker in message for marker in ("content-type", "content type", "unexpected", "mcp")))
+        if unexpected_plaintext or "aborted by a reconnect teardown" in message:
+            return True
+    return False
+
+
+def _handle_non_idempotent_transport_without_replay(
+        server_name: str, exc: BaseException, retry_call, op_description: str, *, tool_name: str):
+    """Reconnect an ambiguous transport for an explicit non-idempotent tool.
+
+    This recoverer is installed only for ``idempotentHint=false`` and never
+    calls ``retry_call``.  Earlier recoverers own auth, expired-session, and
+    dead-stdio failures; this catches timeout/connection/plaintext-response
+    variants that otherwise fall through as generic errors.
+    """
+    del retry_call  # document and enforce: this recovery path cannot replay
+    if not _is_ambiguous_transport_failure(exc):
+        return None
+    # This error is emitted only after the lifecycle has already requested and
+    # begun a transport rebuild. Setting the event again can survive into the
+    # fresh session and tear it down a second time.
+    if _is_reconnect_teardown_failure(exc):
+        _core._bump_server_error(server_name)
+        return _non_idempotent_uncertain_result(
+            server_name, tool_name, "an in-progress reconnect teardown",
+            connection_recovered=False, recovery_in_progress=True)
+    srv = _lookup_reconnectable_server(server_name)
+    reconnected = False
+    if srv is not None:
+        if _mcp_loop_running():
+            reconnected = _loop._signal_reconnect_and_wait(
+                server_name, srv, op_description=op_description, timeout=15)
+        else:
+            _loop._signal_reconnect(srv)
+    (_core._reset_server_error if reconnected else _core._bump_server_error)(server_name)
+    return _non_idempotent_uncertain_result(
+        server_name, tool_name, "ambiguous transport response",
+        connection_recovered=reconnected)
 
 
 def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float, recoverers,
@@ -288,7 +489,9 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
     # immediately instead of waiting out the full tool timeout on a transport nobody will ever answer.
     _stdio_dead = getattr(server, "_stdio_children_dead", None)
     if callable(_stdio_dead) and _stdio_dead() is True:
-        raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' had already exited when the call was dispatched")
+        raise _StdioChildExited(
+            f"MCP stdio subprocess for '{server_name}' had already exited before the call was dispatched",
+            dispatched=False)
     _call_coro = server.session.call_tool(tool_name, arguments=args)
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
@@ -302,7 +505,7 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
         done, _pending = await asyncio.wait({rpc_task, watch_task}, return_when=asyncio.FIRST_COMPLETED)
         if watch_task in done and not rpc_task.done():
             rpc_task.cancel()
-            raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' exited mid-call")
+            raise _StdioChildExited(f"MCP stdio subprocess for '{server_name}' exited mid-call", dispatched=True)
         return await rpc_task
     finally:
         watch_task.cancel()
@@ -416,8 +619,14 @@ def _render_call_tool_result(result, server_name: str) -> str:
         return json.dumps({"result": text_result}, ensure_ascii=False)
 
 
-def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
-    """Sync registry handler (``handler(args_dict, **kwargs) -> str``) calling an MCP tool via the background loop."""
+def _make_tool_handler(
+        server_name: str, tool_name: str, tool_timeout: float, *, allow_replay: bool = True):
+    """Build a synchronous MCP tool handler.
+
+    ``allow_replay=False`` is an operator-side hard floor used by trusted
+    plugin wrappers for financial/non-idempotent calls.  Unlike discovery
+    metadata it cannot be overwritten by a lazy reconnect's upstream manifest.
+    """
     op = f"tools/call {tool_name}"
 
     def _handler(args: dict, **kwargs) -> str:
@@ -443,9 +652,20 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         def _on_failure(exc):
             _core._bump_server_error(server_name)
             logger.error("MCP tool %s/%s call failed: %s", server_name, tool_name, exc)
+        recoverers = (
+            _handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry,
+            _handle_session_expired_and_retry)
+        # Only an explicit false disables recovery replay.  ``True`` and
+        # missing/invalid annotations intentionally retain legacy behaviour.
+        if (allow_replay is False
+                or _core._tool_idempotent_hints.get(server_name, {}).get(tool_name) is False):
+            recoverers = tuple(partial(
+                recover, allow_replay=False, tool_name=tool_name) for recover in recoverers)
+            recoverers += (partial(
+                _handle_non_idempotent_transport_without_replay, tool_name=tool_name),)
         return _dispatch(
             server_name, server, op, _call, tool_timeout,
-            (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, _handle_session_expired_and_retry),
+            recoverers,
             _on_failure, record_outcome=True)
     return _handler
 

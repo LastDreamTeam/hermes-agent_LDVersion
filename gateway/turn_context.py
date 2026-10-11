@@ -50,6 +50,11 @@ class TurnContext:
     event_message_id: Optional[str] = None
     # Raw inbound platform id (not the event_message_id reply anchor); stamped on the user turn.
     inbound_message_id: Optional[str] = None
+    # Gateway-authenticated inbound provenance for authorization hooks. ``inbound_author_text``
+    # is captured by the platform adapter before quote/OCR/STT/attachment enrichment; ``None``
+    # means that adapter did not establish a trusted boundary.
+    inbound_author_text: Optional[str] = None
+    inbound_internal: Optional[bool] = None
     moa_config: Optional[dict] = None
     persist_user_message: Optional[Any] = None
     persist_user_timestamp: Optional[float] = None
@@ -64,6 +69,7 @@ class TurnContext:
     needs_progress_queue: bool = False
     AIAgent: Any = None
     resolve_display_setting: Any = None
+    _user_phrase: Any = None
     result_holder: list = field(default_factory=lambda: [None])
     tools_holder: list = field(default_factory=lambda: [None])
     stream_consumer_holder: list = field(default_factory=lambda: [None])

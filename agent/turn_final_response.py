@@ -8,6 +8,7 @@ re-prompt, scaffolding pop, stop gates, then the durable final flush. Extracted 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import logging
 from typing import Any, Dict, Optional
 
@@ -56,7 +57,8 @@ def finish_text_response(
     iteration-limit summarization; the final message is appended and flushed only after the
     stop gates accept it."""
     from agent.conversation_loop import (
-        _CODEX_ACK_CONTINUATION_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT, _join_truncated_parts
+        _CODEX_ACK_CONTINUATION_NUDGE, _DROPPED_TOOLCALL_NUDGE_CONTENT,
+        _PROMISE_GUARD_CONTINUATION_NUDGE, _join_truncated_parts,
     )
 
     def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> FinalResponseVerdict:
@@ -113,20 +115,36 @@ def finish_text_response(
     # heal threshold, deliver the queued notice through the status/warning callback — the normal out-of-band
     # delivery channel (gateway status message / CLI print). NEVER appended to messages/api_messages:
     # conversation context and the cached prompt prefix stay byte-identical.
-    from agent.agent_runtime_helpers import (
-        intent_ack_continuation_mode, trailing_continue_intent
+    from agent.agent_runtime_helpers import intent_ack_continuation_mode
+    from agent.promise_continue_guard import (
+        AMBIGUOUS, NEGATED, PAST_TENSE, QUOTED, READY, WAIT_AUTH,
+        continuation_safety_veto_reason, inspect_continue_candidate,
     )
 
     _ack_mode = intent_ack_continuation_mode(agent)
+    _guard_text = agent._strip_think_blocks(final_response or "")
+    _guard_decision = inspect_continue_candidate(_guard_text)
+    _guard_mode = getattr(agent, "_promise_guard_mode", "shadow")
+    _common_veto = (
+        _guard_decision["status"] in {WAIT_AUTH, PAST_TENSE, NEGATED, QUOTED, AMBIGUOUS}
+        or bool(continuation_safety_veto_reason(_guard_text))
+    )
+    if _guard_mode == "shadow" and _guard_decision["status"] != "NO_CANDIDATE":
+        logger.info(
+            "Promise guard shadow decision: status=%s action=%s text_sha256=%s",
+            _guard_decision["status"], _guard_decision.get("action") or "none",
+            hashlib.sha256(_guard_text.encode("utf-8", errors="replace")).hexdigest()[:16],
+        )
     # Said-continue-but-stopped guard: no tool calls but the short reply TAILS with an
     # announced next action. Reuses the SAME bounded continuation counter (max 2 per turn).
     _stall_continue_intent = (
         bool(getattr(agent, "_stall_guards", True))
+        and _guard_mode == "enforce"
         and agent.valid_tool_names
         and codex_ack_continuations < 2
-        and trailing_continue_intent(agent._strip_think_blocks(final_response or ""))
+        and _guard_decision["status"] == READY
     )
-    if _stall_continue_intent or (
+    _legacy_ack_continue_intent = (
         _ack_mode != "off"
         and agent.valid_tool_names
         and codex_ack_continuations < 2
@@ -134,7 +152,8 @@ def finish_text_response(
             user_message=user_message, assistant_content=final_response, messages=messages,
             require_workspace=(_ack_mode == "codex_only"),
         )
-    ):
+    )
+    if not _common_veto and (_stall_continue_intent or _legacy_ack_continue_intent):
         if _stall_continue_intent:
             logger.info(
                 "Stall guard: turn ending on trailing continue-"
@@ -144,15 +163,23 @@ def finish_text_response(
         codex_ack_continuations += 1
         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
         append_message(messages, interim_msg)
-        agent._emit_interim_assistant_message(interim_msg)
-        append_message(messages, {"role": "user", "content": _CODEX_ACK_CONTINUATION_NUDGE})
+        # A promise-guard hit is internal recovery, not user-facing progress.  Do not
+        # explicitly deliver the dangling promise as a second message.  Preserve the
+        # historical callback behavior for the legacy acknowledgment path.
+        if not _stall_continue_intent:
+            agent._emit_interim_assistant_message(interim_msg)
+        append_message(messages, {
+            "role": "user",
+            "content": (
+                _PROMISE_GUARD_CONTINUATION_NUDGE
+                if _stall_continue_intent else _CODEX_ACK_CONTINUATION_NUDGE
+            ),
+        })
         agent._session_messages = messages
         # An acknowledgment is non-final: its text must not suppress iteration-limit
         # summarization if the continuation exhausts budget.
         final_response = None
         return _verdict("continue")
-
-    codex_ack_continuations = 0
 
     if truncated_response_parts:
         final_response = _join_truncated_parts([*truncated_response_parts, final_response])

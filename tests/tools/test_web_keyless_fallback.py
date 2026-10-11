@@ -10,7 +10,7 @@ Covers:
 """
 
 import json
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -88,6 +88,23 @@ class TestParseMcpBody:
     def test_garbage_raises(self):
         with pytest.raises(keyless_mcp.KeylessMCPError):
             keyless_mcp._parse_mcp_body("<html>nope</html>")
+
+
+class TestMcpCall:
+    def test_decodes_charsetless_sse_as_utf8(self):
+        text = "标题：上海天气"
+        payload = {"result": {"content": [{"type": "text", "text": text}]}}
+        body = f"event: message\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+        response = Mock(
+            status_code=200,
+            content=body.encode("utf-8"),
+            # This mirrors requests' wrong default for text/event-stream without
+            # a charset and proves mcp_call does not use response.text.
+            text=body.encode("utf-8").decode("iso-8859-1"),
+        )
+
+        with patch("requests.post", return_value=response):
+            assert keyless_mcp.mcp_call("https://mcp.example", "search", {}) == text
 
 
 class TestExaTextParsing:

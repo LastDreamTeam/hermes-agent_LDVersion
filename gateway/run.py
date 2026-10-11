@@ -3968,6 +3968,7 @@ class GatewayRunner(
         """Resolved session-hygiene configuration for one inbound turn."""
         model: str
         threshold_pct: float
+        threshold_tokens_cap: Optional[int]
         compression_enabled: bool
         hard_msg_limit: int
         timeout_seconds: float
@@ -3979,6 +3980,7 @@ class GatewayRunner(
         base_url: Optional[str]
         api_key: Optional[str]
         data: Any
+        notify_turn_hold: bool
 
     @dataclasses.dataclass
     class _HygieneAttempt:
@@ -4306,6 +4308,8 @@ class GatewayRunner(
         _native_slack_task_cards: Any = None
         needs_progress_queue: Any = None
         _generic_status_phrase: Any = None
+        _user_phrase: Any = None
+        _phrase_home: Any = None
 
     @dataclasses.dataclass
     class _RunAgentWorker:

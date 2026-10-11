@@ -127,6 +127,10 @@ def get_available_skills() -> Dict[str, List[str]]:
 # === Update check ===
 
 _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600  # avoid repeated git fetches
+# Cross-border GitHub routes can complete successfully after the original 10s
+# deadline.  The check runs in a background thread and is cached for six hours,
+# so a bounded 45s transport deadline improves reliability without blocking UI.
+_UPDATE_GIT_TIMEOUT_SECONDS = 45
 
 # Returned when an update is known to exist but commits can't be counted (e.g. nix builds).
 UPDATE_AVAILABLE_NO_COUNT = -1
@@ -249,7 +253,11 @@ def _tips_behind(head_rev: Optional[str], target_rev: Optional[str], repo_dir: O
 
 def _upstream_main_sha() -> Optional[str]:
     """Tip SHA of upstream main via HTTPS ls-remote (no auth, no prompts)."""
-    result = _git_run(["ls-remote", _UPSTREAM_REPO_URL, "refs/heads/main"], timeout=10, network=True)
+    result = _git_run(
+        ["ls-remote", _UPSTREAM_REPO_URL, "refs/heads/main"],
+        timeout=_UPDATE_GIT_TIMEOUT_SECONDS,
+        network=True,
+    )
     if result is None or result.returncode != 0 or not result.stdout:
         return None
     return result.stdout.split()[0] or None
@@ -294,7 +302,12 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # A scoped fetch still updates ``origin/main`` and FETCH_HEAD; ``--depth 1`` preserves
         # the shallow boundary.
         fetch_args = ["fetch", "origin", "main", *(["--depth", "1"] if is_shallow else []), "--quiet"]
-        return _git_ok(fetch_args, cwd=repo_dir, timeout=10, network=True)
+        return _git_ok(
+            fetch_args,
+            cwd=repo_dir,
+            timeout=_UPDATE_GIT_TIMEOUT_SECONDS,
+            network=True,
+        )
 
     fetch_ok = _quiet(_fetch, False)  # Offline or timeout — don't use stale refs
     # When the fetch fails the local origin/main ref is stale: it cannot prove *currentness*, but

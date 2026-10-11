@@ -578,6 +578,8 @@ def _ensure_session_row(agent: Any, pending_cli_message: Any) -> None:
 def _collect_pre_llm_call_context(
     agent: Any, *, effective_task_id: str, turn_id: str, original_user_message: Any,
     messages: List[Any], conversation_history: Optional[List[Any]],
+    trusted_user_message: Optional[str], trusted_user_message_id: Optional[str],
+    trusted_user_message_internal: Optional[bool],
 ) -> str:
     """Run ``pre_llm_call`` plugins; their context is injected into the user message
     (never the system prompt). Oversized per-hook context is spilled to disk so a
@@ -596,6 +598,9 @@ def _collect_pre_llm_call_context(
             platform=getattr(agent, "platform", None) or "",
             parent_session_id=getattr(agent, "_parent_session_id", None) or "",
             sender_id=getattr(agent, "_user_id", None) or "",
+            trusted_user_message=trusted_user_message,
+            trusted_user_message_id=trusted_user_message_id,
+            trusted_user_message_internal=trusted_user_message_internal,
         )
         try:
             # Spill oversized per-hook context to disk so a runaway plugin can't inflate every subsequent
@@ -747,6 +752,8 @@ def build_turn_context(
     persist_user_message: Optional[Any], persist_user_timestamp: Optional[float]=None,
     persist_user_platform_id: Optional[str]=None, *, persist_user_display_kind: Optional[str]=None,
     persist_user_display_metadata: Optional[Dict[str, Any]]=None, restore_or_build_system_prompt,
+    trusted_user_message: Optional[str]=None, trusted_user_message_id: Optional[str]=None,
+    trusted_user_message_internal: Optional[bool]=None,
     install_safe_stdio, sanitize_surrogates, summarize_user_message_for_log, set_session_context,
     set_current_write_origin, ra, moa_active: bool=False,
 ) -> TurnContext:
@@ -784,6 +791,8 @@ def build_turn_context(
         user_message = sanitize_surrogates(user_message)
     if isinstance(persist_user_message, str):
         persist_user_message = sanitize_surrogates(persist_user_message)
+    if isinstance(trusted_user_message, str):
+        trusted_user_message = sanitize_surrogates(trusted_user_message)
 
     effective_task_id, turn_id = _bind_turn_identity(
         agent, task_id, stream_callback, persist_user_message,
@@ -859,6 +868,9 @@ def build_turn_context(
         agent, effective_task_id=effective_task_id, turn_id=turn_id,
         original_user_message=original_user_message, messages=messages,
         conversation_history=conversation_history,
+        trusted_user_message=trusted_user_message,
+        trusted_user_message_id=trusted_user_message_id,
+        trusted_user_message_internal=trusted_user_message_internal,
     )
     plugin_user_context = _merge_gateway_notes(
         agent, messages, current_turn_user_idx, plugin_user_context

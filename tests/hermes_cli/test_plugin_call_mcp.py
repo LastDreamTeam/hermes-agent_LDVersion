@@ -35,11 +35,12 @@ def _patch_handler(monkeypatch, response: str, captured: dict | None = None):
     import tools.mcp_tool as mcp_mod
     from tools import mcp_tool_handlers as _mcp_handlers
 
-    def _fake_make_handler(server_name, tool_name, tool_timeout):
+    def _fake_make_handler(server_name, tool_name, tool_timeout, *, allow_replay=True):
         if captured is not None:
             captured["server"] = server_name
             captured["tool"] = tool_name
             captured["timeout"] = tool_timeout
+            captured["allow_replay"] = allow_replay
 
         def _handler(args, **kwargs):
             if captured is not None:
@@ -129,7 +130,21 @@ def test_allowed_call_routes_through_existing_handler(monkeypatch):
     assert captured["server"] == "github"
     assert captured["tool"] == "create_issue"
     assert captured["args"] == {"title": "bug"}
+    assert captured["allow_replay"] is True
     assert result == {"ok": True, "result": "issue #7 created"}
+
+
+def test_non_idempotent_plugin_call_disables_replay_explicitly(monkeypatch):
+    _patch_config(monkeypatch, {"my-plugin": {"mcp_allowlist": ["ride"]}})
+    captured = {}
+    _patch_handler(monkeypatch, json.dumps({"result": "submitted"}), captured)
+
+    result = _make_ctx().call_mcp(
+        "ride", "create_order", {"trace": "x"}, allow_replay=False
+    )
+
+    assert result == {"ok": True, "result": "submitted"}
+    assert captured["allow_replay"] is False
 
 
 def test_error_result_maps_to_ok_false(monkeypatch):

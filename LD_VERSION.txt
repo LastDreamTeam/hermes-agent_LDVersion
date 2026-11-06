@@ -1,0 +1,42 @@
+Hermes LD Version - legacy/main_20261106
+
+Purpose
+This branch is a frozen public archive of the Hermes core source tree that Shanghai
+and the Los Angeles command host (美机 199.102.216.209 / 新美指挥中枢) were both
+running on 2026-11-06 (Asia/Shanghai). It is NOT for auto-deploy, NOT a bot
+instance backup, and NOT an upgrade to the newest official Hermes tip.
+
+Provenance
+- Trusted release id: owner-full-v7.3-single-gateway-20261014
+- Release path on both hosts: /opt/hermes-trusted/releases/owner-full-v7.3-single-gateway-20261014
+- Trusted manifest sha256 (both hosts identical):
+  7ad76facd11f036a11aa49fb9c8ab0a08decc319d5ffc49f08788bb396b4b530
+- Companion checkout reported by CLI on both hosts:
+  Hermes Agent v0.21.5+4592.g5bb2be1 · git HEAD 5bb2be179dff5005c00837bc9ec678c6bdb82bde
+- Note: /opt/hermes-trusted/current symlink was stale (still pointed at
+  owner-full-v4-20260910-life-services). Runtime truth came from
+  /etc/hermes-trusted/runtime.json + the live gateway process, which both
+  hosts bound to owner-full-v7.3-single-gateway-20261014.
+- Sources checked: Shanghai 47.117.165.87 and 美机 199.102.216.209. 呆呆机 211
+  was intentionally excluded (different build: v0.21.0 @ 5e645791 + local patches).
+- Export date: 2026-11-06 Asia/Shanghai.
+
+Public-source boundary
+Same policy family as main_1. Do not commit instance configs, .env files, OAuth
+state, credentials, private keys, user identifiers, memories, personal Markdown,
+bot profiles, session databases, conversations, logs, operator scripts, private
+skills or archives. Upstream product templates SOUL.md / AGENTS.md are kept.
+Private confirmation phrase and internal display labels in five files were
+replaced with generic public equivalents (CONFIRM_DELETE / 指定主控助手); see
+LD_SOURCE_POLICY.json. Live host files were not modified by this archive.
+
+Related branches
+- main: official NousResearch/hermes-agent snapshot line (updated separately).
+- legacy/main_20261011: earlier official main tip archive @ 97a9ae8.
+- main_1: LD Shanghai-core development export (older upstream base f1ccf436 + LD
+  patches). This legacy branch freezes the later trusted production tree instead.
+
+Do not run hermes update / git pull to switch a live machine onto this branch.
+Validate an isolated candidate first; keep a rollback; request an explicit
+maintenance window before any cutover. This archive does not restart or change
+any running Hermes service.

@@ -1,0 +1,6 @@
+name: owner-action-approval
+version: "2.0.0"
+description: "Owner-only Didi, Amap and NetEase tools with direct writes and one per-turn token only for true deletion."
+hooks:
+  - pre_llm_call
+  - pre_tool_call

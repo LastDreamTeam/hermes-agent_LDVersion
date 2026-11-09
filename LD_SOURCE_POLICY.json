@@ -1,0 +1,23 @@
+{
+  "upstream": "NousResearch/hermes-agent",
+  "base_commit": "2bd378ed1b8d6bf2192cb26e0a55ff3091e6bd19",
+  "version": "0.23.0",
+  "scope": "upstream tracked system source plus documented portable LD patches",
+  "excluded": [
+    "profiles",
+    "memory",
+    "state databases",
+    "OAuth credentials",
+    "bot configuration",
+    "voice assets",
+    "chat transcripts",
+    "deployment backups",
+    "node_modules",
+    "build caches"
+  ],
+  "patches": [
+    "profile-scoped Nous shared auth selection",
+    "OpenCode Go Gemini 4 Argon reasoning effort"
+  ],
+  "workflow_policy": "Existing main_ld workflows preserved unchanged; upstream workflow updates require separately authorized workflow scope."
+}

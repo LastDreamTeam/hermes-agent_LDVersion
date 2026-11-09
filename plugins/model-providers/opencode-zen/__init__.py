@@ -91,6 +91,12 @@ class OpenCodeGoProfile(ProviderProfile):
     def build_api_kwargs_extras(
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        # LD 2026-11-09: Go added Gemini 4 after this profile shipped.
+        # Its live OpenAI-compatible route accepts reasoning_effort=medium.
+        # Keep this narrow and removable when upstream gains the translation.
+        if _flat_model_name(model) == "gemini-4-argon":
+            effort = re_.requested_effort(reasoning_config)
+            return ({}, {"reasoning_effort": effort}) if effort in re_.GEMINI4_THINKING_LEVELS else ({}, {})
         if _is_glm_5_2_model(model):
             # Native reasoning_effort knob (high/max); server default when unset/disabled.
             effort = re_.requested_effort(reasoning_config)

@@ -354,7 +354,10 @@ def _nous_shared_auth_dir() -> Path:
     oauth`` one-tap imports it). Written on login AND every runtime refresh so the refresh_token
     stays current across profiles; a stale token just falls back to device-code.
     """
-    override = os.getenv("HERMES_SHARED_AUTH_DIR", "").strip()
+    # OpenAI: Project compatibility fix — select the routed profile's account store;
+    # process-global env would mix rotated tokens from separate Nous accounts.
+    from agent.secret_scope import get_secret_str
+    override = get_secret_str("HERMES_SHARED_AUTH_DIR").strip()
     if override:
         return Path(override).expanduser()
     from hermes_constants import get_default_hermes_root

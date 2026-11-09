@@ -1159,6 +1159,28 @@ export const en: Translations = {
       contextPlaceholder: 'Auto'
     },
     computerUse: {
+      linuxNote: "Drives your desktop via the X11/XWayland accessibility stack — no permission prompt.",
+      windowsNote: "First run may trigger a Windows SmartScreen prompt for the cua-driver UIAccess worker — allow it.",
+      granted: "Granted",
+      notGranted: "Not granted",
+      unknown: "Unknown",
+      readFailed: "Could not read Computer Use status",
+      grantFailed: "Could not request permissions",
+      approveTitle: "Approve in System Settings",
+      approveMessage: "macOS will show a permission dialog attributed to CuaDriver. Approve it, then return here.",
+      checking: "Checking Computer Use status…",
+      unsupported: "Computer Use is not supported on this platform",
+      installHint: "Install the cua-driver backend below to drive this machine.",
+      grantHint: " Then grant Accessibility and Screen Recording here.",
+      identityHint: "Grants attach to CuaDriver's own identity (com.trycua.driver), not Hermes — so the dialog is attributed to the process that drives your Mac.",
+      recheck: "Recheck",
+      accessibilityHint: "Lets cua-driver post clicks, keystrokes, and read the accessibility tree.",
+      screenHint: "Lets cua-driver capture screenshots of app windows.",
+      ready: "Ready",
+      notReady: "Not ready",
+      readyHint: "Computer Use is ready. Ask the agent to capture an app and click around.",
+      waiting: "Waiting for approval…",
+      grant: "Grant permissions",
       accessibility: 'Accessibility',
       screenRecording: 'Screen Recording',
       driverHealth: 'Driver health'
@@ -4600,6 +4622,19 @@ export const en: Translations = {
       gatewayDisconnected: 'Hermes is offline right now. Reconnect, then send it again.'
     },
     tool: {
+      // View-only activity labels; categories and tool behavior stay unchanged.
+      runSummary: {
+        analyze: { noun: ['image', 'images'], past: 'Analyzed', present: 'Analyzing' },
+        browse: { noun: ['page', 'pages'], past: 'Opened', present: 'Opening' },
+        delegate: { noun: ['task', 'tasks'], past: 'Delegated', present: 'Delegating' },
+        edit: { noun: ['file', 'files'], past: 'Edited', present: 'Editing' },
+        explore: { noun: ['file', 'files'], past: 'Explored', present: 'Exploring' },
+        interact: { noun: ['browser action', 'browser actions'], past: 'Performed', present: 'Performing' },
+        other: { noun: ['tool', 'tools'], past: 'Used', present: 'Using' },
+        read: { noun: ['page', 'pages'], past: 'Read', present: 'Reading' },
+        run: { noun: ['command', 'commands'], past: 'Ran', present: 'Running' },
+        search: { noun: ['query', 'queries'], past: 'Searched', present: 'Searching' }
+      },
       copyCode: 'Copy code',
       renderingImage: 'Rendering image',
       copyOutput: 'Copy output',

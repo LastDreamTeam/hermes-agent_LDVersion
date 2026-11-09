@@ -965,6 +965,28 @@ export interface Translations extends NoticeTranslations {
       contextPlaceholder: string
     }
     computerUse: {
+      linuxNote: string
+      windowsNote: string
+      granted: string
+      notGranted: string
+      unknown: string
+      readFailed: string
+      grantFailed: string
+      approveTitle: string
+      approveMessage: string
+      checking: string
+      unsupported: string
+      installHint: string
+      grantHint: string
+      identityHint: string
+      recheck: string
+      accessibilityHint: string
+      screenHint: string
+      ready: string
+      notReady: string
+      readyHint: string
+      waiting: string
+      grant: string
       accessibility: string
       screenRecording: string
       driverHealth: string
@@ -4079,6 +4101,10 @@ export interface Translations extends NoticeTranslations {
       gatewayDisconnected: string
     }
     tool: {
+      runSummary: Record<
+        'analyze' | 'browse' | 'delegate' | 'edit' | 'explore' | 'interact' | 'other' | 'read' | 'run' | 'search',
+        { noun: [string, string]; past: string; present: string }
+      >
       copyCode: string
       renderingImage: string
       copyOutput: string

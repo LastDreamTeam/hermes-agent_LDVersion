@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
+import { setRuntimeI18nLocale } from '@/i18n/runtime'
+
 import { summarizeToolRun, type ToolCallLike } from './run-summary'
 
 function tool(toolName: string, args: Record<string, unknown> = {}, result?: unknown): ToolCallLike {
@@ -117,5 +119,18 @@ describe('summarizeToolRun', () => {
   it('counts vision analysis as images', () => {
     expect(settled([analyzed('shot.png')])).toBe('Analyzed 1 image')
     expect(settled([analyzed('shot.png'), analyzed('other.png')])).toBe('Analyzed 2 images')
+  })
+})
+
+describe('tool summary language', () => {
+  it('localizes activity copy without changing counts and restores English', () => {
+    try {
+      setRuntimeI18nLocale('zh')
+      expect(settled([read('a.ts'), read('b.ts'), ran('pwd')])).toBe('已检索 2 个文件, 已运行 1 条命令')
+      expect(settled([tool('computer_use', {}, { ok: true })])).toBe('已完成 1 次工具调用')
+    } finally {
+      setRuntimeI18nLocale('en')
+    }
+    expect(settled([ran('pwd')])).toBe('Ran 1 command')
   })
 })

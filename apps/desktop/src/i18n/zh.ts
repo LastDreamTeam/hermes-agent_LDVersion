@@ -153,7 +153,7 @@ export const zhOverrides = {
       desktopBootFailed: '桌面启动失败',
       gatewayConnectionLost: '与网关的连接已断开',
       gatewayConnectionLostDetail:
-        'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
+        '仍在后台重试。你可以继续阅读和起草消息；若持续无法连接，请打开网关设置。',
       gatewaySignInRequired: '需要登录网关',
       ipcBridgeUnavailable: '桌面 IPC 桥不可用。'
     },
@@ -1210,6 +1210,28 @@ export const zhOverrides = {
       contextPlaceholder: '自动'
     },
     computerUse: {
+      linuxNote: "通过 X11／XWayland 无障碍接口操作桌面，无需额外权限提示。",
+      windowsNote: "首次运行可能出现 cua-driver UIAccess 进程的 Windows SmartScreen 提示，请核对后允许。",
+      granted: "已授权",
+      notGranted: "未授权",
+      unknown: "未知",
+      readFailed: "无法读取桌面操作状态",
+      grantFailed: "无法请求权限",
+      approveTitle: "在系统设置中批准",
+      approveMessage: "macOS 将显示 CuaDriver 的权限对话框。批准后请返回此处。",
+      checking: "正在检查桌面操作状态…",
+      unsupported: "此平台不支持桌面操作",
+      installHint: "请在下方安装 cua-driver 后端，以操作此设备。",
+      grantHint: " 然后在此授予辅助功能和屏幕录制权限。",
+      identityHint: "权限授予 CuaDriver 的身份（com.trycua.driver），因此对话框显示的是实际操作 Mac 的进程。",
+      recheck: "重新检查",
+      accessibilityHint: "允许 cua-driver 点击、输入按键和读取无障碍控件树。",
+      screenHint: "允许 cua-driver 截取应用窗口。",
+      ready: "已就绪",
+      notReady: "未就绪",
+      readyHint: "桌面操作已就绪，可以让智能体截图并操作应用。",
+      waiting: "等待批准…",
+      grant: "授予权限",
       accessibility: '辅助功能',
       screenRecording: '屏幕录制',
       driverHealth: '驱动健康状态'
@@ -2513,7 +2535,7 @@ export const zhOverrides = {
     restarting: '正在重启…',
     restartFailedManual: '网关重启失败 — 请手动重启并检查网关日志。',
     relayLink: {
-      title: 'Team Gateway',
+      title: '团队网关',
       badge: '无需机器人令牌',
       intro: (platform: string) => `${platform} 通过共享的 Hermes 机器人连接到此智能体。关联你的 ${platform} 账号，然后给机器人发消息即可与智能体对话。`,
       link: (platform: string) => `关联 ${platform}`,
@@ -2606,7 +2628,7 @@ export const zhOverrides = {
       MATTERMOST_URL: { label: '服务器 URL', placeholder: 'https://mattermost.example.com' },
       MATTERMOST_TOKEN: { label: 'Bot 令牌' },
       MATTERMOST_ALLOWED_USERS: { label: '允许的用户 ID', help: '推荐。Mattermost 用户 ID（每格一个）。' },
-      MATRIX_HOMESERVER: { label: 'Homeserver URL', placeholder: 'https://matrix.org' },
+      MATRIX_HOMESERVER: { label: '主服务器 URL', placeholder: 'https://matrix.org' },
       MATRIX_ACCESS_TOKEN: { label: '访问令牌' },
       MATRIX_USER_ID: { label: 'Bot 用户 ID', placeholder: '@hermes:example.org' },
       MATRIX_ALLOWED_USERS: { label: '允许的 Matrix 用户 ID', help: '推荐。@user:server 格式的用户 ID（每格一个）。' },
@@ -4014,7 +4036,7 @@ export const zhOverrides = {
       toggleTerminal: '终端',
       toggleTokensPerSecond: '每秒 token 数',
       toggleVersion: '版本与更新',
-      toggleFreeTier: 'Free tier',
+      toggleFreeTier: '免费档位',
       toggleWorkspace: '工作区',
       cacheHitRateTitle: '本会话的提示缓存命中率 — 缓存 token 更便宜，越高越省',
       tokensPerSecondTitle: '每秒输出 token 数，取最近 10 次模型调用的平均值',
@@ -4490,6 +4512,88 @@ export const zhOverrides = {
       gatewayDisconnected: 'Hermes 网关未连接'
     },
     tool: {
+      runSummary: {
+        "analyze": {
+          "noun": [
+            "张图片",
+            "张图片"
+          ],
+          "past": "已分析",
+          "present": "正在分析"
+        },
+        "browse": {
+          "noun": [
+            "个页面",
+            "个页面"
+          ],
+          "past": "已打开",
+          "present": "正在打开"
+        },
+        "delegate": {
+          "noun": [
+            "项任务",
+            "项任务"
+          ],
+          "past": "已委派",
+          "present": "正在委派"
+        },
+        "edit": {
+          "noun": [
+            "个文件",
+            "个文件"
+          ],
+          "past": "已编辑",
+          "present": "正在编辑"
+        },
+        "explore": {
+          "noun": [
+            "个文件",
+            "个文件"
+          ],
+          "past": "已检索",
+          "present": "正在检索"
+        },
+        "interact": {
+          "noun": [
+            "次浏览器操作",
+            "次浏览器操作"
+          ],
+          "past": "已执行",
+          "present": "正在执行"
+        },
+        "other": {
+          "noun": [
+            "次工具调用",
+            "次工具调用"
+          ],
+          "past": "已完成",
+          "present": "正在调用"
+        },
+        "read": {
+          "noun": [
+            "个页面",
+            "个页面"
+          ],
+          "past": "已读取",
+          "present": "正在读取"
+        },
+        "run": {
+          "noun": [
+            "条命令",
+            "条命令"
+          ],
+          "past": "已运行",
+          "present": "正在运行"
+        },
+        "search": {
+          "noun": [
+            "次查询",
+            "次查询"
+          ],
+          "past": "已搜索",
+          "present": "正在搜索"
+        }
+      },
       copyCode: '复制代码',
       renderingImage: '正在渲染图片',
       copyOutput: '复制输出',

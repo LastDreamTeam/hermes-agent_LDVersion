@@ -1,4 +1,4 @@
-import { translateNow } from '@/i18n'
+import { runtimeTranslations, translateNow } from '@/i18n'
 import { summarizeShellCommand } from '@/lib/summarize-command'
 import { firstStringField } from '@/lib/text'
 
@@ -48,19 +48,6 @@ const CATEGORY_ORDER: readonly RunCategory[] = [
   'delegate',
   'other'
 ]
-
-const CATEGORY_COPY: Record<RunCategory, { noun: [string, string]; past: string; present: string }> = {
-  analyze: { noun: ['image', 'images'], past: 'Analyzed', present: 'Analyzing' },
-  browse: { noun: ['page', 'pages'], past: 'Opened', present: 'Opening' },
-  delegate: { noun: ['task', 'tasks'], past: 'Delegated', present: 'Delegating' },
-  edit: { noun: ['file', 'files'], past: 'Edited', present: 'Editing' },
-  explore: { noun: ['file', 'files'], past: 'Explored', present: 'Exploring' },
-  interact: { noun: ['browser action', 'browser actions'], past: 'Performed', present: 'Performing' },
-  other: { noun: ['tool', 'tools'], past: 'Used', present: 'Using' },
-  read: { noun: ['page', 'pages'], past: 'Read', present: 'Reading' },
-  run: { noun: ['command', 'commands'], past: 'Ran', present: 'Running' },
-  search: { noun: ['query', 'queries'], past: 'Searched', present: 'Searching' }
-}
 
 // Routed by name so a web search never counts as an explored file (#123085).
 // Browser tools other than navigation are interaction, not page loads: a
@@ -116,7 +103,7 @@ export function toolPresentVerb(toolName: string): string {
     return translateNow('assistant.tool.skillActivity.loading')
   }
 
-  return CATEGORY_COPY[toolCategory(toolName)].present
+  return runtimeTranslations().assistant.tool.runSummary[toolCategory(toolName)].present
 }
 
 /** The thing a tool acted on, as the header should name it. */
@@ -158,7 +145,7 @@ function toolTarget(tool: ToolCallLike): string {
  * command line only earns its space while it's the thing you're waiting on.
  */
 function clause(category: RunCategory, tools: ToolCallLike[], live: boolean): string {
-  const copy = CATEGORY_COPY[category]
+  const copy = runtimeTranslations().assistant.tool.runSummary[category]
   const verb = live ? copy.present : copy.past
   const count = tools.reduce((sum, tool) => sum + unitCount(tool), 0)
   const target = count === 1 && category !== 'interact' ? toolTarget(tools[0]) : ''

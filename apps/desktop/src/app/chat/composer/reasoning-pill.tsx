@@ -32,7 +32,8 @@ const PILL = cn(
  * Reads THIS surface's SessionView (primary or tile), like the model pill.
  */
 export function ReasoningPill({ disabled, model }: { disabled: boolean; model: ChatBarState['model'] }) {
-  const copy = useI18n().t.shell.modelOptions
+  const { locale, t } = useI18n()
+  const copy = t.shell.modelOptions
   const view = useSessionView()
   const reasoningEffort = useStore(view.$reasoningEffort)
   const reasoningEffortWire = useStore(view.$reasoningEffortWire)
@@ -49,7 +50,11 @@ export function ReasoningPill({ disabled, model }: { disabled: boolean; model: C
   // spells out the CLI's wording in the tooltip, so Ultra is never shown as a
   // distinct wire level the route does not have (#61634).
   const clamp = reasoningEffortClamp(effort, reasoningEffortWire)
-  const label = reasoningEffortLabel(effort, reasoningEffortWire)
+  const label = reasoningEffortLabel(
+    effort,
+    reasoningEffortWire,
+    locale === 'zh' ? { ...copy, none: t.common.off } : undefined
+  )
 
   // Until the session reports its own effort, the profile default is a guess
   // about to be replaced (#79807). Show the model pill's quiet loader instead.

@@ -1029,7 +1029,7 @@ function ModelFamilyRow({
   provider,
   search
 }: ModelFamilyRowProps): ReactElement {
-  const { t } = useI18n()
+  const { locale, t } = useI18n()
   const copy = t.shell.modelMenu
   const copyPicker = t.modelPicker
   const closeMenu = useContext(ModelMenuCloseContext)
@@ -1093,7 +1093,11 @@ function ModelFamilyRow({
       : null,
     daybreak?.on ? t.shell.modelOptions.daybreak : null,
     (caps?.reasoning ?? true) && (isCurrent ? !current.effortPending : Boolean(effEffort))
-      ? reasoningEffortLabel(effEffort || defaultEffort, isCurrent ? current.effortWire : undefined)
+      ? reasoningEffortLabel(
+          effEffort || defaultEffort,
+          isCurrent ? current.effortWire : undefined,
+          locale === 'zh' ? { ...t.shell.modelOptions, none: t.common.off } : undefined
+        )
       : null
   ].filter((setting): setting is string => Boolean(setting))
 

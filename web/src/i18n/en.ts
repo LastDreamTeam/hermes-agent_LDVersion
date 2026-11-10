@@ -1,6 +1,19 @@
 import type { Translations } from "./types";
 
 export const en: Translations = {
+  reasoningPicker: {
+    "title": "reasoning",
+    "levels": {
+      "none": "Off (no thinking)",
+      "minimal": "Minimal",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Extra High",
+      "max": "Max",
+      "ultra": "Ultra"
+    }
+  },
   common: {
     save: "Save",
     saving: "Saving...",

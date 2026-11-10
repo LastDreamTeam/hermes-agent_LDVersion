@@ -3946,7 +3946,7 @@ export const zhOverrides = {
       options: '选项',
       thinking: '思考',
       fast: '快速',
-      ultrafast: 'Ultrafast',
+      ultrafast: '极速',
       useStandardSpeed: '使用标准速度',
       effort: '推理强度',
       minimal: '最小',

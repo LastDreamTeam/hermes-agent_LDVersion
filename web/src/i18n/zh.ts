@@ -1,6 +1,19 @@
 import type { Translations } from "./types";
 
 export const zh: Translations = {
+  reasoningPicker: {
+    "title": "推理强度",
+    "levels": {
+      "none": "关闭思考",
+      "minimal": "最小",
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "xhigh": "极高",
+      "max": "最高",
+      "ultra": "超高"
+    }
+  },
   common: {
     gatewayHint: "消息平台、API 服务及 Webhook 在“渠道”页面配置。这些设置对整个网关生效，包括代理／中继模式和全局允许名单。",
     gateway: "网关",

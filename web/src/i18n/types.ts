@@ -18,6 +18,11 @@ export type Locale =
   | "ar";
 
 export interface Translations {
+  /** Optional display copy; canonical reasoning values are never translated. */
+  reasoningPicker?: {
+    title: string;
+    levels: Record<string, string>;
+  };
   // ── Common ──
   common: {
     save: string;
